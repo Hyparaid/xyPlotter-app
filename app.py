@@ -381,28 +381,58 @@ xy_tab, vt_tab, vq_tab, ce_tab, box_tab = st.tabs([
 
 # ---------- XY Builder (USE PLOTLY DEFAULT COLORS) ----------
 with xy_tab:
-    st.subheader("Free‑form XY plot builder")
+    st.subheader("Free-form XY plot builder")
     all_cols = [c for c in work.columns if c != "__file"]
     numeric_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(work[c])]
 
+    # Initialize session state for XY selections
+    if "xy_x" not in st.session_state:
+        st.session_state.xy_x = G["time"] if G["time"] in all_cols else (all_cols[0] if all_cols else None)
+    if "xy_y" not in st.session_state:
+        defaults = [c for c in [G["voltage"], G["capacity"]] if c in numeric_cols]
+        st.session_state.xy_y = defaults[:1] if defaults else (numeric_cols[:1] if numeric_cols else [])
+
     c1, c2, c3 = st.columns([1,1,1])
     with c1:
-        x_col = st.selectbox("X axis", all_cols, index=(all_cols.index(G["time"]) if G["time"] in all_cols else 0))
-        x_log = st.checkbox("Log X", value=False)
+        x_col = st.selectbox(
+            "X axis", all_cols,
+            index=(all_cols.index(st.session_state.xy_x) if st.session_state.xy_x in all_cols else 0),
+            key="xy_x_select"
+        )
         align_t0 = st.checkbox("Treat X as time and align t₀", value=(G["time"] == x_col))
         x_min = st.text_input("X min (blank=auto)", value="")
         x_max = st.text_input("X max (blank=auto)", value="")
     with c2:
-        y_cols = st.multiselect("Y axis (one or more)", numeric_cols, default=[c for c in [G["voltage"], G["capacity"]] if c in numeric_cols][:1])
-        y_log = st.checkbox("Log Y", value=False)
+        y_cols = st.multiselect(
+            "Y axis (one or more)", numeric_cols,
+            default=[y for y in st.session_state.xy_y if y in numeric_cols] or (numeric_cols[:1] if numeric_cols else []),
+            key="xy_y_multi"
+        )
         y_min = st.text_input("Y min (blank=auto)", value="")
         y_max = st.text_input("Y max (blank=auto)", value="")
     with c3:
         color_by = st.selectbox("Color by", ["__file"] + all_cols, index=0)
         rolling = st.number_input("Rolling mean window (pts)", min_value=1, max_value=9999, value=1, step=1)
 
-    plot_df = work.dropna(subset=[x_col] + y_cols).copy()
-    if align_t0:
+        # NEW: Swap button — swaps X with the first selected Y
+        if st.button("Swap X ↔ Y", help="Swap X with the first selected Y"):
+            if y_cols:
+                old_x = x_col
+                new_x = y_cols[0]
+                # New Y list: old X + the remaining Ys (excluding the one moved to X)
+                new_y = [old_x] + [v for v in y_cols[1:] if v != old_x]
+                # Persist in session_state so the UI reflects the swap after rerun
+                st.session_state.xy_x = new_x
+                st.session_state.xy_y = new_y
+                x_col = new_x
+                y_cols = new_y
+
+    # Persist current selections in session_state
+    st.session_state.xy_x = x_col
+    st.session_state.xy_y = y_cols
+
+    plot_df = work.dropna(subset=[x_col] + y_cols).copy() if y_cols else work.copy()
+    if align_t0 and x_col in plot_df.columns:
         try:
             plot_df["_x"] = to_seconds_like(plot_df[x_col])
             x_used = "_x"
@@ -411,48 +441,41 @@ with xy_tab:
     else:
         x_used = x_col
 
-    if rolling > 1:
+    if rolling > 1 and y_cols:
         plot_df = plot_df.sort_values(["__file", x_used])
         for y in y_cols:
-            plot_df[y] = plot_df.groupby("__file")[y].transform(lambda s: s.rolling(rolling, min_periods=1).mean())
+            if y in plot_df.columns:
+                plot_df[y] = plot_df.groupby("__file")[y].transform(lambda s: s.rolling(rolling, min_periods=1).mean())
 
     fig = go.Figure()
+
+    # Special case: X == Cycle Index and Y is capacity-like → aggregate per cycle
     cap_cols_like = [
-        "Spec. Cap.(mAh/g)",
-        "Capacity(mAh)",
-        "DChg. Spec. Cap.(mAh/g)",
-        "Chg. Spec. Cap.(mAh/g)",
+        "Spec. Cap.(mAh/g)", "Capacity(mAh)",
+        "DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)",
     ]
     cycle_col = G.get("cycle")
 
-    # Special case: X == Cycle Index and Y is capacity-like → aggregate to one value per cycle
-    if cycle_col and x_used == cycle_col and any(y in cap_cols_like for y in y_cols):
+    if y_cols and cycle_col and x_used == cycle_col and any(y in cap_cols_like for y in y_cols):
         groups = plot_df[color_by].astype(str).unique() if color_by else [None]
         for y in y_cols:
-            if y not in cap_cols_like:
-                # fall back to generic behavior for non-capacity columns
-                for gval in groups:
-                    sdf = plot_df if gval is None else plot_df[plot_df[color_by].astype(str) == str(gval)]
-                    if sdf.empty:
-                        continue
-                    name = f"{y} — {gval}" if gval is not None else y
-                    agg = sdf.groupby(cycle_col, as_index=False)[y].max().sort_values(cycle_col)
-                    fig.add_trace(go.Scatter(x=agg[cycle_col], y=agg[y], mode=("lines+markers" if show_markers else "lines"), name=name))
-            else:
-                for gval in groups:
-                    sdf = plot_df if gval is None else plot_df[plot_df[color_by].astype(str) == str(gval)]
-                    if sdf.empty:
-                        continue
-                    name = f"{y} — {gval}" if gval is not None else y
-                    agg = sdf.groupby(cycle_col, as_index=False)[y].max().sort_values(cycle_col)
-                    fig.add_trace(go.Scatter(x=agg[cycle_col], y=agg[y], mode=("lines+markers" if show_markers else "lines"), name=name))
+            groups_iter = groups
+            for gval in groups_iter:
+                sdf = plot_df if gval is None else plot_df[plot_df[color_by].astype(str) == str(gval)]
+                if sdf.empty:
+                    continue
+                name = f"{y} — {gval}" if gval is not None else y
+                agg = sdf.groupby(cycle_col, as_index=False)[y].max().sort_values(cycle_col)
+                fig.add_trace(go.Scatter(x=agg[cycle_col], y=agg[y],
+                                         mode=("lines+markers" if show_markers else "lines"),
+                                         name=name))
     else:
         # Generic, always-on segmentation for any X/Y pairing
         groups = plot_df[color_by].astype(str).unique() if color_by else [None]
-        for y in y_cols:
+        for y in (y_cols or []):
             for gval in groups:
                 sdf = plot_df if gval is None else plot_df[plot_df[color_by].astype(str) == str(gval)]
-                if sdf.empty:
+                if sdf.empty or x_used not in sdf.columns or y not in sdf.columns:
                     continue
                 cols = [x_used, y, color_by] if color_by else [x_used, y]
                 for extra in ["__file", "Cycle Index", "Step Type", G.get("capacity", "")]:
@@ -461,18 +484,14 @@ with xy_tab:
                 s2 = sdf[cols].dropna(subset=[x_used, y]).copy()
                 s2 = insert_line_breaks_generic(
                     s2, x_col=x_used, y_col=y,
-                    seg_cycle=seg_cycle, seg_step=seg_step,
-                    seg_cap_reset=seg_cap_reset, seg_current_flip=seg_current_flip,
-                    seg_x_reverse=seg_x_reverse, x_rev_eps=x_rev_eps,
+                    seg_cycle=True, seg_step=True, seg_cap_reset=True,
+                    seg_current_flip=True, seg_x_reverse=True, x_rev_eps=0.0,
                     cap_col_name=G.get("capacity")
                 )
-                trace_name = f"{y} — {gval}" if gval is not None else y
-                fig.add_trace(go.Scatter(x=s2[x_used], y=s2[y], mode="lines", name=trace_name))
+                fig.add_trace(go.Scatter(x=s2[x_used], y=s2[y], mode="lines",
+                                         name=(f"{y} — {gval}" if gval is not None else y)))
 
-    if x_log:
-        fig.update_xaxes(type="log")
-    if y_log:
-        fig.update_yaxes(type="log")
+    # Manual ranges
     try:
         if x_min != "":
             fig.update_xaxes(range=[float(x_min), float(x_max) if x_max != "" else None])
@@ -483,9 +502,10 @@ with xy_tab:
             fig.update_yaxes(range=[float(y_min), float(y_max) if y_max != "" else None])
     except Exception:
         pass
-    fig.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
-    st.plotly_chart(fig, use_container_width=True)
 
+    fig.update_layout(template="plotly_white",
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+    st.plotly_chart(fig, use_container_width=True)
 # ---------- Voltage–Time (USE color_map) ----------
 with vt_tab:
     st.subheader("Voltage–Time")
