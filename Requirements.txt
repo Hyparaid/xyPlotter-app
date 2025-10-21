@@ -1,9 +1,5 @@
-# Core
-streamlit
-pandas
-numpy
-plotly
-# --- optional extras maybe future update---
-# python-pptx  		# for generating PowerPoint files
-# kaleido		# to export Plotly figures as PNG/SVG for slides/reports
-# pyarrow               # faster IO (CSV/Parquet); 
+streamlit>=1.38
+pandas>=2.2
+numpy>=1.26,<3.0
+plotly>=5.22
+
