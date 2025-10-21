@@ -18,8 +18,8 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🔋 PRELI BATTERY CELL DATA —  VISUALIZER")
-st.caption("Built by the Preli team.")
+st.title("🔋 PRELI BATTERY CELL DATA —  VISUALIZER 📈")
+st.caption("Built by the Preli team 🧠🧱 .")
 
 # =============================
 # Helpers
