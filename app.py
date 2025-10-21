@@ -417,29 +417,57 @@ with xy_tab:
             plot_df[y] = plot_df.groupby("__file")[y].transform(lambda s: s.rolling(rolling, min_periods=1).mean())
 
     fig = go.Figure()
-    cap_name = G.get("capacity")
-    # Always apply generic segmentation across any X/Y combo, grouped by 'color_by'
-    groups = plot_df[color_by].astype(str).unique() if color_by else [None]
-    for y in y_cols:
-        for gval in groups:
-            sdf = plot_df if gval is None else plot_df[plot_df[color_by].astype(str) == str(gval)]
-            if sdf.empty:
-                continue
-            cols = [x_used, y, color_by] if color_by else [x_used, y]
-            # include helpful columns if present
-            for extra in ["__file", "Cycle Index", "Step Type", cap_name]:
-                if extra and extra in sdf.columns and extra not in cols:
-                    cols.append(extra)
-            s2 = sdf[cols].dropna(subset=[x_used, y]).copy()
-            s2 = insert_line_breaks_generic(
-                s2, x_col=x_used, y_col=y,
-                seg_cycle=seg_cycle, seg_step=seg_step,
-                seg_cap_reset=seg_cap_reset, seg_current_flip=seg_current_flip,
-                seg_x_reverse=seg_x_reverse, x_rev_eps=x_rev_eps,
-                cap_col_name=cap_name,
-            )
-            trace_name = f"{y} — {gval}" if gval is not None else y
-            fig.add_trace(go.Scatter(x=s2[x_used], y=s2[y], mode="lines", name=trace_name))
+    cap_cols_like = [
+        "Spec. Cap.(mAh/g)",
+        "Capacity(mAh)",
+        "DChg. Spec. Cap.(mAh/g)",
+        "Chg. Spec. Cap.(mAh/g)",
+    ]
+    cycle_col = G.get("cycle")
+
+    # Special case: X == Cycle Index and Y is capacity-like → aggregate to one value per cycle
+    if cycle_col and x_used == cycle_col and any(y in cap_cols_like for y in y_cols):
+        groups = plot_df[color_by].astype(str).unique() if color_by else [None]
+        for y in y_cols:
+            if y not in cap_cols_like:
+                # fall back to generic behavior for non-capacity columns
+                for gval in groups:
+                    sdf = plot_df if gval is None else plot_df[plot_df[color_by].astype(str) == str(gval)]
+                    if sdf.empty:
+                        continue
+                    name = f"{y} — {gval}" if gval is not None else y
+                    agg = sdf.groupby(cycle_col, as_index=False)[y].max().sort_values(cycle_col)
+                    fig.add_trace(go.Scatter(x=agg[cycle_col], y=agg[y], mode=("lines+markers" if show_markers else "lines"), name=name))
+            else:
+                for gval in groups:
+                    sdf = plot_df if gval is None else plot_df[plot_df[color_by].astype(str) == str(gval)]
+                    if sdf.empty:
+                        continue
+                    name = f"{y} — {gval}" if gval is not None else y
+                    agg = sdf.groupby(cycle_col, as_index=False)[y].max().sort_values(cycle_col)
+                    fig.add_trace(go.Scatter(x=agg[cycle_col], y=agg[y], mode=("lines+markers" if show_markers else "lines"), name=name))
+    else:
+        # Generic, always-on segmentation for any X/Y pairing
+        groups = plot_df[color_by].astype(str).unique() if color_by else [None]
+        for y in y_cols:
+            for gval in groups:
+                sdf = plot_df if gval is None else plot_df[plot_df[color_by].astype(str) == str(gval)]
+                if sdf.empty:
+                    continue
+                cols = [x_used, y, color_by] if color_by else [x_used, y]
+                for extra in ["__file", "Cycle Index", "Step Type", G.get("capacity", "")]:
+                    if extra and extra in sdf.columns and extra not in cols:
+                        cols.append(extra)
+                s2 = sdf[cols].dropna(subset=[x_used, y]).copy()
+                s2 = insert_line_breaks_generic(
+                    s2, x_col=x_used, y_col=y,
+                    seg_cycle=seg_cycle, seg_step=seg_step,
+                    seg_cap_reset=seg_cap_reset, seg_current_flip=seg_current_flip,
+                    seg_x_reverse=seg_x_reverse, x_rev_eps=x_rev_eps,
+                    cap_col_name=G.get("capacity")
+                )
+                trace_name = f"{y} — {gval}" if gval is not None else y
+                fig.add_trace(go.Scatter(x=s2[x_used], y=s2[y], mode="lines", name=trace_name))
 
     if x_log:
         fig.update_xaxes(type="log")
