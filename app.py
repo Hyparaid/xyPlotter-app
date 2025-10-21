@@ -288,7 +288,7 @@ def insert_line_breaks_generic(df: pd.DataFrame, x_col: str, y_col: str,
 # =============================
 st.sidebar.header("Upload files")
 uploaded_files = st.sidebar.file_uploader(
-    "Drop CSV/XLSX (multiple allowed)", type=["csv", "txt", "tsv", "xlsx", "xlsm", "xls"], accept_multiple_files=True
+    "Drop CSV file (multiple allowed)", type=["csv only"], accept_multiple_files=True
 )
 
 palette_name = st.sidebar.selectbox("Palette", list(PALETTES.keys()), index=0)
