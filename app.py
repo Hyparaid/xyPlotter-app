@@ -41,8 +41,7 @@ HERE = Path(__file__).parent
 LOGO_PATH = HERE / "logo.png"   # exact filename
 # Center the banner
 c1, c2, c3 = st.columns([1, 1, 1])
-with c2:
-        st.image(_load_png(str(LOGO_PATH)), width="content")
+
 st.title("🔋BATTERY CELL DATA —  VISUALIZER 📈")
 st.caption("     Built by the Preli team    ")
 
