@@ -33,9 +33,9 @@ st.set_page_config(
     page_icon="🔋",
     layout="wide",
 )
-@st.cache_data
-def _load_png(path: str):
-    return Image.open(path)
+#@st.cache_data
+#def _load_png(path: str):
+# #return Image.open(path)
 
 HERE = Path(__file__).parent
 LOGO_PATH = HERE / "logo.png"   # exact filename
