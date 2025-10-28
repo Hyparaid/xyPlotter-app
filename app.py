@@ -1021,37 +1021,37 @@ with ce_tab:
         st.plotly_chart(fig_ce, use_container_width=True)
 
 # ---------- Box plots ----------
-"""with box_tab:
-    st.subheader("Distribution box plots")
-    num_cols = [c for c in data.columns if c != "__file" and pd.api.types.is_numeric_dtype(data[c])]
-    if not num_cols:
-        st.info("Need at least one numeric column.")
-    else:
-        y_box = st.selectbox(
-            "Numeric column for Y", num_cols,
-            index=(num_cols.index("Spec. Cap.(mAh/g)") if "Spec. Cap.(mAh/g)" in num_cols else 0)
-        )
+# with box_tab:
+#     st.subheader("Distribution box plots")
+#     num_cols = [c for c in data.columns if c != "__file" and pd.api.types.is_numeric_dtype(data[c])]
+#     if not num_cols:
+#         st.info("Need at least one numeric column.")
+#     else:
+#         y_box = st.selectbox(
+#             "Numeric column for Y", num_cols,
+#             index=(num_cols.index("Spec. Cap.(mAh/g)") if "Spec. Cap.(mAh/g)" in num_cols else 0)
+#         )
 
-        # choose x/color field from global mode
-        if color_mode_global == "Per file":
-            group_field = "__file"
-            cmap = color_map_file
-        else:
-            # ensure __family exists (done earlier)
-            group_field = "__family"
-            cmap = color_map_fam
+#         # choose x/color field from global mode
+#         if color_mode_global == "Per file":
+#             group_field = "__file"
+#             cmap = color_map_file
+#         else:
+#             # ensure __family exists (done earlier)
+#             group_field = "__family"
+#             cmap = color_map_fam
 
-        dfb = data.dropna(subset=[y_box]).copy()
-        fig_box = px.box(
-            dfb, x=group_field, y=y_box, color=group_field,
-            points="all", color_discrete_map=cmap
-        )
-        fig_box.update_layout(template="plotly_white",
-                              xaxis_title=("File" if group_field == "__file" else "Filename family"))
-        if show_grid:
-            fig_box.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-            fig_box.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        st.plotly_chart(fig_box, use_container_width=True)
-"""
+#         dfb = data.dropna(subset=[y_box]).copy()
+#         fig_box = px.box(
+#             dfb, x=group_field, y=y_box, color=group_field,
+#             points="all", color_discrete_map=cmap
+#         )
+#         fig_box.update_layout(template="plotly_white",
+#                               xaxis_title=("File" if group_field == "__file" else "Filename family"))
+#         if show_grid:
+#             fig_box.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+#             fig_box.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+#         st.plotly_chart(fig_box, use_container_width=True)
+
 
 st.success("Loaded. Use the tabs above to explore your NDAX data.")
