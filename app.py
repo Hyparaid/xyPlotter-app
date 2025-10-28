@@ -9,6 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import warnings
 
 # ----------------------------
 # NDAX imports
@@ -33,9 +34,6 @@ st.set_page_config(
     page_icon="🔋",
     layout="wide",
 )
-#@st.cache_data
-#def _load_png(path: str):
-# #return Image.open(path)
 
 HERE = Path(__file__).parent
 LOGO_PATH = HERE / "logo.png"   # exact filename
@@ -185,6 +183,33 @@ def normalize_neware_headers(df: pd.DataFrame) -> pd.DataFrame:
     ensure("Step Type", "status", "state", "mode", "step")
     return d
 
+warnings.filterwarnings(
+    "ignore",
+    message="The behavior of DataFrame concatenation with empty or all-NA entries is deprecated",
+    category=FutureWarning,
+)
+
+def _concat_nonempty(frames):
+    """Concat after dropping empty or all-NaN DataFrames."""
+    if not frames:
+        return pd.DataFrame()
+    keep = []
+    for f in frames:
+        if f is None:
+            continue
+        if isinstance(f, pd.DataFrame) and (not f.empty):
+            # drop DataFrames that are all-NaN (no real values anywhere)
+            if not f.isna().all().all():
+                keep.append(f)
+    if not keep:
+        # return an empty frame with union of columns to keep downstream code happy
+        cols = pd.Index([])
+        for f in frames:
+            if isinstance(f, pd.DataFrame):
+                cols = cols.union(f.columns)
+        return pd.DataFrame(columns=cols)
+    return pd.concat(keep, ignore_index=True, copy=False)
+
 def infer_rest_step(
     df: pd.DataFrame,
     step_col: str = "Step Type",
@@ -316,7 +341,7 @@ def insert_line_breaks_vq(df: pd.DataFrame, cap_col: str, v_col: str) -> pd.Data
         pieces.append(pd.DataFrame([nan_row]))
         last = i + 1
     pieces.append(d.iloc[last:])
-    return pd.concat(pieces, ignore_index=True)
+    return _concat_nonempty(pieces)
 
 def insert_line_breaks_vt(df: pd.DataFrame, t_col: str, v_col: str) -> pd.DataFrame:
     """Insert NaNs at cycle changes and at Rest transitions."""
@@ -345,7 +370,7 @@ def insert_line_breaks_vt(df: pd.DataFrame, t_col: str, v_col: str) -> pd.DataFr
         pieces.append(pd.DataFrame([nan_row]))
         last = i + 1
     pieces.append(d.iloc[last:])
-    return pd.concat(pieces, ignore_index=True)
+    return _concat_nonempty(pieces)
 
 def compute_ce(df: pd.DataFrame, cell_type: str = "cathode") -> pd.DataFrame:
     """Cycle-wise CE; prefers specific-cap columns, otherwise totals."""
@@ -476,7 +501,7 @@ def insert_line_breaks_generic(
         pieces.append(pd.DataFrame([nan_row]))
         last = idx + 1
     pieces.append(d.iloc[last:])
-    return pd.concat(pieces, ignore_index=True)
+    return _concat_nonempty(pieces)
 
 
 # ----------------------------
@@ -545,7 +570,7 @@ frames = [df for df in all_frames if df is not None and not df.empty]
 if not frames:
     st.error("All uploaded NDAX files were empty.")
     st.stop()
-raw = pd.concat(frames, ignore_index=True)
+raw = _concat_nonempty(frames)
 G = detect_columns(list(raw.columns))
 
 # All distinct file names present
@@ -639,8 +664,7 @@ def color_for_src(src: str) -> str:
 # Tabs
 # ----------------------------
 xy_tab, vt_tab, vq_tab, cap_tab, ce_tab, box_tab = st.tabs([
-    "XY Builder", "Voltage–Time", "Voltage–Capacity", "Capacity vs Cycle", "Capacity & CE", "Box plots"
-])
+    "XY Builder", "Voltage–Time", "Voltage–Capacity", "Capacity vs Cycle", "Capacity & CE",])
 #--------------------------------------
 # ---------- XY Builder ---------------
 # -------------------------------------
@@ -997,7 +1021,7 @@ with ce_tab:
         st.plotly_chart(fig_ce, use_container_width=True)
 
 # ---------- Box plots ----------
-with box_tab:
+"""with box_tab:
     st.subheader("Distribution box plots")
     num_cols = [c for c in data.columns if c != "__file" and pd.api.types.is_numeric_dtype(data[c])]
     if not num_cols:
@@ -1028,6 +1052,6 @@ with box_tab:
             fig_box.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig_box.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         st.plotly_chart(fig_box, use_container_width=True)
-
+"""
 
 st.success("Loaded. Use the tabs above to explore your NDAX data.")
