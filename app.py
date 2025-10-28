@@ -663,7 +663,7 @@ def color_for_src(src: str) -> str:
 # ----------------------------
 # Tabs
 # ----------------------------
-xy_tab, vt_tab, vq_tab, cap_tab, ce_tab, box_tab = st.tabs([
+xy_tab, vt_tab, vq_tab, cap_tab, ce_tab, = st.tabs([
     "XY Builder", "Voltage–Time", "Voltage–Capacity", "Capacity vs Cycle", "Capacity & CE",])
 #--------------------------------------
 # ---------- XY Builder ---------------
