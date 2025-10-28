@@ -848,7 +848,7 @@ with xy_tab:
 
 # ---------- Voltage–Time ----------
 with vt_tab:
-    st.subheader("Voltage–Time (NDAX)")
+    st.subheader("Voltage–Time")
     tcol, vcol = G["time"], G["voltage"]
     if not tcol or not vcol or tcol not in data.columns or vcol not in data.columns:
         st.warning("Couldn’t detect time/voltage. Check NDAX headers.")
@@ -897,7 +897,7 @@ with vt_tab:
 
 # ---------- Voltage–Capacity ----------
 with vq_tab:
-    st.subheader("Voltage–Capacity (NDAX)")
+    st.subheader("Voltage–Capacity")
     ccol, vcol = G["capacity"], G["voltage"]
     if not ccol or not vcol or ccol not in data.columns or vcol not in data.columns:
         st.warning("Couldn’t detect capacity/voltage. Check NDAX headers.")
@@ -976,7 +976,7 @@ with cap_tab:
 
 # ---------- Capacity & CE ----------
 with ce_tab:
-    st.subheader("Capacity & Coulombic Efficiency vs Cycle (dual-axis)")
+    st.subheader("Capacity & Coulombic Efficiency vs Cycle")
     cyc = G["cycle"]
     cap_col = None
     for cand in ["Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)", "Capacity(mAh)"]:
