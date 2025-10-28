@@ -885,7 +885,7 @@ with vt_tab:
 
         fig_vt.update_layout(
             template="plotly_white",
-            xaxis_title=f"Time ({ABBR[unit]}, aligned)",
+            xaxis_title=f"Time ({ABBR[unit]})",
             yaxis_title=vcol,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
         )
