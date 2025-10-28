@@ -1011,13 +1011,44 @@ with ce_tab:
                     marker=dict(size=marker_size, symbol="diamond", color=c)
                 ), secondary_y=True)
         y_left = "Specific capacity (mAh/g)" if "mAh/g" in (cap_col or "") else "Capacity (mAh)"
+
+            #UI controls
+        show_grid = st.checkbox("Show grid", value=True, key="ce_show_grid")
+        grid_side = st.radio(
+            "Y-grid on",
+            ["left", "right", "both", "none"],
+            index=0,  # default = left
+            key="ce_grid_side"
+        )
+        
         fig_ce.update_yaxes(title_text=y_left, secondary_y=False)
         fig_ce.update_yaxes(title_text="CE (%)", range=[90, 105], secondary_y=True)
         fig_ce.update_xaxes(title_text="Cycle")
         fig_ce.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        if show_grid:
+
+        if show_grid and grid_side != "none":
+            # X-axis grid ON
             fig_ce.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-            fig_ce.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+
+            # Left Y grid
+            fig_ce.update_yaxes(
+                showgrid=(grid_side in ["left", "both"]),
+                gridcolor=NV_COLORDICT["nv_gray3"],
+                gridwidth=0.5,
+                secondary_y=False
+            )
+            # Right Y grid
+            fig_ce.update_yaxes(
+                showgrid=(grid_side in ["right", "both"]),
+                gridcolor=NV_COLORDICT["nv_gray3"],
+                gridwidth=0.5,
+                secondary_y=True
+            )
+        else:
+            # turn all grids off
+            fig_ce.update_xaxes(showgrid=False)
+            fig_ce.update_yaxes(showgrid=False, secondary_y=False)
+            fig_ce.update_yaxes(showgrid=False, secondary_y=True)
         st.plotly_chart(fig_ce, use_container_width=True)
 
 # ---------- Box plots ----------
