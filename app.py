@@ -815,7 +815,7 @@ with xy_tab:
                 fig.add_trace(go.Scatter(
                 x=s2[x_used], y=s2[y],
                 mode="lines",
-                name=f"{y} — {src}",
+                name=f"{src}",
                 line=dict(color=c, width=line_width),
                 marker=dict(size=marker_size)
                 ))
@@ -823,7 +823,7 @@ with xy_tab:
                 fig.add_trace(go.Scatter(
                 x=s2[x_used], y=s2[y],
                 mode="lines",
-                name=f"{y} — {src}",
+                name=f"{src}",
                 line=dict(width=line_width),   # no color → Plotly default cycle
                 marker=dict(size=marker_size)
                 ))      
