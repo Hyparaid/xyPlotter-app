@@ -31,6 +31,15 @@ except Exception:
 # App config
 # ----------------------------
 
+# Export via the modebar camera button
+CAMERA_CFG = {
+    "toImageButtonOptions": {
+        "format": "png",      # or "svg"
+        "filename": "plot",
+        "scale": 4            # 2–4 is great for PPT
+    }
+}
+
 st.set_page_config(
     page_title="Battery Cell Data — Visualizer",
     page_icon="🔋",
@@ -896,8 +905,8 @@ with vt_tab:
         if show_grid:
             fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        st.plotly_chart(fig_vt, use_container_width=True)
-
+        #st.plotly_chart(fig_vt, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=False, config=CAMERA_CFG)
 
 # ---------- Voltage–Capacity ----------
 with vq_tab:
