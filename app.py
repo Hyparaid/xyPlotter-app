@@ -10,6 +10,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 import warnings
+import io
+import plotly.io as pio
 
 # ----------------------------
 # NDAX imports
@@ -188,6 +190,19 @@ warnings.filterwarnings(
     message="The behavior of DataFrame concatenation with empty or all-NA entries is deprecated",
     category=FutureWarning,
 )
+def download_png_button(fig, filename="plot.png", width_in=6.0, height_in=4.0, dpi=600, label=None, key=None):
+    w_px = int(width_in * dpi)
+    h_px = int(height_in * dpi)
+    png = pio.to_image(fig, format="png", width=w_px, height=h_px, scale=1, engine="kaleido")
+    import streamlit as st
+    st.download_button(
+        label or f"Download PNG ({dpi} dpi)",
+        data=png,
+        file_name=filename,
+        mime="image/png",
+        key=key,
+    )
+
 
 def _concat_nonempty(frames):
     """Concat after dropping empty or all-NaN DataFrames."""
@@ -844,7 +859,7 @@ with xy_tab:
             fig.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         st.plotly_chart(fig, use_container_width=True)
-
+download_png_button(fig, filename="plot.png", width_in=6, height_in=4, dpi=600, key="xy")
 
 # ---------- Voltage–Time ----------
 with vt_tab:
@@ -893,7 +908,7 @@ with vt_tab:
             fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         st.plotly_chart(fig_vt, use_container_width=True)
-
+download_png_button(fig_vt, filename="voltage_time_600dpi.png", width_in=6, height_in=4, dpi=600, key="dl_vt")
 
 # ---------- Voltage–Capacity ----------
 with vq_tab:
@@ -939,6 +954,7 @@ with vq_tab:
             fig_vq.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig_vq.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         st.plotly_chart(fig_vq, use_container_width=True)
+download_png_button(fig_vq, filename="voltage_cap_600dpi.png", width_in=6, height_in=4, dpi=600, key="dl_vq")
 
 # ---------- Capacity vs Cycle ----------
 with cap_tab:
@@ -973,7 +989,7 @@ with cap_tab:
         fig_cap.update_xaxes(title_text="Cycle", showgrid=show_grid, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         fig_cap.update_yaxes(title_text=y_label, showgrid=show_grid, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         st.plotly_chart(fig_cap, use_container_width=True)
-
+download_png_button(fig_cap, filename="Cap_600dpi.png", width_in=6, height_in=4, dpi=600, key="dl_cap")
 # ---------- Capacity & CE ----------
 with ce_tab:
     st.subheader("Capacity & Coulombic Efficiency vs Cycle")
@@ -1050,7 +1066,7 @@ with ce_tab:
             fig_ce.update_yaxes(showgrid=False, secondary_y=False)
             fig_ce.update_yaxes(showgrid=False, secondary_y=True)
         st.plotly_chart(fig_ce, use_container_width=True)
-
+download_png_button(fig_ce, filename="CE_600dpi.png", width_in=6, height_in=4, dpi=600, key="dl_ce")
 # ---------- Box plots ----------
 # with box_tab:
 #     st.subheader("Distribution box plots")
