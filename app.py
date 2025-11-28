@@ -12,6 +12,7 @@ import streamlit as st
 import warnings
 import io
 import plotly.io as pio
+import plotly.graph_objects as go
 
 # ----------------------------
 # NDAX imports
@@ -200,7 +201,78 @@ warnings.filterwarnings(
     category=FutureWarning,
 )
 
+##### FIGURE HELPER ###
+# one place to tweak the “look”
+_MPL = {
+    "font": "Arial",          # or "DejaVu Sans"
+    "fs": 18,                 # base font size
+    "tick_fs": 16,
+    "line_w": 2.5,
+    "grid_c": "#c0c0c0",
+    "grid_w": 0.6,
+    "axis_w": 1.5,
+}
 
+def matplotlibish(
+    fig: go.Figure,
+    title: str | None = None,
+    xlab: str | None = None,
+    ylab: str | None = None,
+    legend_loc: str = "inside",  # "inside" or "right"
+) -> go.Figure:
+    """Apply Matplotlib-like aesthetics to a Plotly figure."""
+    fig.update_layout(
+        template="simple_white",
+        title=dict(text=title or fig.layout.title.text, x=0.5, xanchor="center",
+                   y=0.97, font=dict(size=_MPL["fs"] + 2)),
+        font=dict(family=_MPL["font"], size=_MPL["fs"]),
+        margin=dict(l=80, r=30, t=60, b=70),
+        hovermode="x unified",
+    )
+
+    # Boxed axes with inside ticks (Matplotlib vibe)
+    for ax in ("xaxis", "yaxis"):
+        fig.update_layout({
+            ax: dict(
+                title=dict(text=(xlab if ax=="xaxis" else ylab) or
+                               fig.layout.get(ax).title.text,
+                           standoff=10),
+                showline=True, linecolor="black", linewidth=_MPL["axis_w"],
+                mirror=True,  # draws a full box
+                ticks="inside", ticklen=6, tickwidth=1.2,
+                tickfont=dict(size=_MPL["tick_fs"]),
+                showgrid=True, gridcolor=_MPL["grid_c"], gridwidth=_MPL["grid_w"],
+            )
+        })
+
+    # Thicker traces + nicer markers
+    fig.update_traces(
+        selector=dict(type="scatter"),
+        line=dict(width=_MPL["line_w"]),
+        marker=dict(size=6, line=dict(width=1))
+    )
+
+    # Legend styling/placement
+    if legend_loc == "inside":
+        fig.update_layout(
+            legend=dict(
+                x=0.02, y=0.98, xanchor="left", yanchor="top",
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="rgba(0,0,0,0.25)", borderwidth=1,
+                orientation="v", font=dict(size=_MPL["fs"])
+            )
+        )
+    else:  # right outside
+        fig.update_layout(
+            legend=dict(
+                x=1.02, y=1.0, xanchor="left", yanchor="top",
+                bgcolor="rgba(0,0,0,0)",
+                borderwidth=0, orientation="v", font=dict(size=_MPL["fs"])
+            ),
+            margin=dict(r=160)  # room for legend
+        )
+
+    return fig
 
 def _concat_nonempty(frames):
     """Concat after dropping empty or all-NaN DataFrames."""
@@ -896,15 +968,25 @@ with vt_tab:
                 marker=dict(size=marker_size)
             ))
 
-        fig_vt.update_layout(
-            template="plotly_white",
-            xaxis_title=f"Time ({ABBR[unit]})",
-            yaxis_title=vcol,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-        )
-        if show_grid:
-            fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-            fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+        #fig_vt.update_layout(
+            #template="plotly_white",
+            #xaxis_title=f"Time ({ABBR[unit]})",
+            #yaxis_title=vcol,
+            #legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        #)
+        fig_vt = matplotlibish(
+        fig_vt,
+        xlab=f"Time ({ABBR[unit]})",
+        ylab=vcol,
+        legend_loc="inside",
+        show_grid=show_grid,                      # <- your sidebar toggle
+        gridcolor=NV_COLORDICT["nv_gray3"],
+        gridwidth=0.5,
+)
+
+        #if show_grid:
+            #fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+            #fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         #st.plotly_chart(fig_vt, use_container_width=True)
         st.plotly_chart(fig, use_container_width=False, config=CAMERA_CFG)
 
