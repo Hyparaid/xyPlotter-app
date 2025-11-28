@@ -979,7 +979,7 @@ with vt_tab:
         xlab=f"Time ({ABBR[unit]})",
         ylab=vcol,
         legend_loc="inside",
-        show_grid=show_grid,                      # <- your sidebar toggle
+        # <- your sidebar toggle
         gridcolor=NV_COLORDICT["nv_gray3"],
         gridwidth=0.5,
 )
