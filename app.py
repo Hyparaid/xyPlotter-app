@@ -192,7 +192,7 @@ def style_for_ppt(fig):
         ticks="outside",
         tickwidth=1,
         ticklen=6,
-        title_font=dict(family="Arial", size=18, color="black"),
+        title_font=dict(family="Arial", size=14, color="black"),
         tickfont=dict(family="Arial", size=14, color="black"),
         
     )
@@ -204,7 +204,7 @@ def style_for_ppt(fig):
         ticks="outside",
         tickwidth=1,
         ticklen=6,
-        title_font=dict(family="Arial", size=18, color="black"),
+        title_font=dict(family="Arial", size=14, color="black"),
         tickfont=dict(family="Arial", size=14, color="black"),
     )
 
