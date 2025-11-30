@@ -235,6 +235,11 @@ def add_ppt_download(fig, filename_base: str):
         file_name=f"{filename_base}.png",
         mime="image/png",
     )
+
+def pretty_src(src: str) -> str:
+    """Shorten file name for legend labels."""
+    return Path(src).stem  # "preli_2.ndax" -> "preli_2"
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -905,7 +910,7 @@ with xy_tab:
                 fig.add_trace(go.Scatter(
                 x=s2[x_used], y=s2[y],
                 mode="lines",
-                name=f"{src}",
+                name=pretty_src(src),
                 line=dict(color=c, width=line_width),
                 marker=dict(size=marker_size)
                 ))
@@ -913,7 +918,7 @@ with xy_tab:
                 fig.add_trace(go.Scatter(
                 x=s2[x_used], y=s2[y],
                 mode="lines",
-                name=f"{src}",
+                name=pretty_src(src),
                 line=dict(width=line_width),   # no color → Plotly default cycle
                 marker=dict(size=marker_size)
                 ))      
@@ -966,7 +971,7 @@ with vt_tab:
             fig_vt.add_trace(go.Scatter(
                 x=s["_t"] / DIV[unit],
                 y=s[vcol],
-                name=src,
+                name=pretty_src(src),
                 mode=("lines+markers" if show_markers else "lines"),
                 line=dict(color=color_for_src(src), width=line_width),
                 marker=dict(size=marker_size)
@@ -1020,7 +1025,7 @@ with vq_tab:
             cols = [ccol, vcol, "__file"] + [c for c in ["Cycle Index", "Step Type"] if c in s.columns]
             plot_df = insert_line_breaks_vq(s[cols], cap_col=ccol, v_col=vcol)
             fig_vq.add_trace(go.Scatter(
-                x=plot_df[ccol], y=plot_df[vcol], name=src,
+                x=plot_df[ccol], y=plot_df[vcol], name=pretty_src(src),
                 mode=("lines+markers" if show_markers else "lines"),
                 line=dict(color=color_for_src(src), width=line_width),
                 marker=dict(size=marker_size)
@@ -1054,7 +1059,7 @@ with cap_tab:
                 continue
             c = color_for_src(src)
             fig_cap.add_trace(go.Scatter(
-                x=cap_cycle[cyc], y=cap_cycle[cap_col], name=f"{src}",
+                x=cap_cycle[cyc], y=cap_cycle[cap_col], name=pretty_src(src),
                 mode=("lines+markers" if show_markers else "lines"),
                 line=dict(color=c, width=line_width),
                 marker=dict(
