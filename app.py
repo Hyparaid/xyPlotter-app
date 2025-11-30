@@ -170,7 +170,7 @@ def style_for_ppt(fig):
     - Matplotlib-like axis borders & ticks
     """
     fig.update_layout(
-        font=dict(family="Arial", size=16),
+        font=dict(family="Arial", size=16, color="black"),
         margin=dict(l=80, r=40, t=60, b=80),
         legend=dict(
             orientation="h",
@@ -192,8 +192,9 @@ def style_for_ppt(fig):
         ticks="outside",
         tickwidth=1,
         ticklen=6,
-        title_font=dict(family="Arial", size=18),
-        tickfont=dict(family="Arial", size=14),
+        title_font=dict(family="Arial", size=18, color="black"),
+        tickfont=dict(family="Arial", size=14, color="black"),
+        
     )
     fig.update_yaxes(
         showline=True,
@@ -203,8 +204,8 @@ def style_for_ppt(fig):
         ticks="outside",
         tickwidth=1,
         ticklen=6,
-        title_font=dict(family="Arial", size=18),
-        tickfont=dict(family="Arial", size=14),
+        title_font=dict(family="Arial", size=18, color="black"),
+        tickfont=dict(family="Arial", size=14, color="black"),
     )
 
 
