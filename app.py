@@ -1041,8 +1041,11 @@ with vq_tab:
         if show_grid:
             fig_vq.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig_vq.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        st.plotly_chart(fig_vq, use_container_width=True)
+        
 
+        style_for_ppt(fig_vq)
+        st.plotly_chart(fig_vq, use_container_width=False, config=CAMERA_CFG)
+        add_ppt_download(fig_vq, filename_base="voltage_capacity")
 
 # ---------- Capacity vs Cycle ----------
 with cap_tab:
@@ -1076,7 +1079,9 @@ with cap_tab:
         fig_cap.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02))
         fig_cap.update_xaxes(title_text="Cycle", showgrid=show_grid, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         fig_cap.update_yaxes(title_text=y_label, showgrid=show_grid, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        st.plotly_chart(fig_cap, use_container_width=True)
+        style_for_ppt(fig_cap)
+        st.plotly_chart(fig_cap, use_container_width=False, config=CAMERA_CFG)
+        add_ppt_download(fig_cap, filename_base="Capacity vs cycle")
 
 # ---------- Capacity & CE ----------
 with ce_tab:
@@ -1153,7 +1158,9 @@ with ce_tab:
             fig_ce.update_xaxes(showgrid=False)
             fig_ce.update_yaxes(showgrid=False, secondary_y=False)
             fig_ce.update_yaxes(showgrid=False, secondary_y=True)
-        st.plotly_chart(fig_ce, use_container_width=True)
+        style_for_ppt(fig_ce)
+        st.plotly_chart(fig_ce, use_container_width=False, config=CAMERA_CFG)
+        add_ppt_download(fig_ce, filename_base="CE & Capacity")
 
 # ---------- Box plots ----------
 # with box_tab:
