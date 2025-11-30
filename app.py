@@ -160,6 +160,83 @@ PALETTES = {
 }
 
 # ----------------------------
+# Figure styling + PPT export helpers
+# ----------------------------
+def style_for_ppt(fig):
+    """
+    Apply a consistent, PPT-friendly style:
+    - Larger font
+    - Horizontal legend with border
+    - Matplotlib-like axis borders & ticks
+    """
+    fig.update_layout(
+        font=dict(family="Arial", size=16),
+        margin=dict(l=80, r=40, t=60, b=80),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            bordercolor="black",
+            borderwidth=1,
+            bgcolor="rgba(255,255,255,0.9)",
+        ),
+    )
+    # Axis borders + ticks (no grid change here)
+    fig.update_xaxes(
+        showline=True,
+        linecolor="black",
+        linewidth=1,
+        mirror=True,
+        ticks="outside",
+        tickwidth=1,
+        ticklen=6,
+    )
+    fig.update_yaxes(
+        showline=True,
+        linecolor="black",
+        linewidth=1,
+        mirror=True,
+        ticks="outside",
+        tickwidth=1,
+        ticklen=6,
+    )
+
+
+def add_ppt_download(fig, filename_base: str):
+    """
+    High-res PNG download for PowerPoint.
+    Requires `kaleido` (pip install -U kaleido).
+    """
+    import io
+
+    buf = io.BytesIO()
+    try:
+        fig.write_image(
+            buf,
+            format="png",
+            width=1600,   # pixels
+            height=900,
+            scale=2,      # supersampling → crisp text
+        )
+    except Exception:
+        st.info(
+            "Static image export not available. "
+            "Install `kaleido` (pip install -U kaleido) "
+            "to enable high-quality PNG downloads."
+        )
+        return
+
+    buf.seek(0)
+    st.download_button(
+        label="⬇️ Download PNG for PPT",
+        data=buf,
+        file_name=f"{filename_base}.png",
+        mime="image/png",
+    )
+
+# ----------------------------
 # Helpers
 # ----------------------------
 def normalize_neware_headers(df: pd.DataFrame) -> pd.DataFrame:
@@ -901,16 +978,20 @@ with vt_tab:
             template="plotly_white",
             xaxis_title=f"Time ({ABBR[unit]})",
             yaxis_title=vcol,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         )
-       
 
         if show_grid:
             fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        #st.plotly_chart(fig_vt, use_container_width=True)
-        st.plotly_chart(fig, use_container_width=False, config=CAMERA_CFG)
 
+        # PPT style + interactive plot
+        style_for_ppt(fig_vt)
+        st.plotly_chart(fig_vt, use_container_width=True, config=CAMERA_CFG)
+
+        # High-res PNG download
+        add_ppt_download(fig_vt, filename_base="voltage_time")
+        
 # ---------- Voltage–Capacity ----------
 with vq_tab:
     st.subheader("Voltage–Capacity")
