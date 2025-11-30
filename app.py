@@ -179,7 +179,7 @@ def style_for_ppt(fig):
             xanchor="left",
             x=0,
             bordercolor="black",
-            borderwidth=1,
+            borderwidth=0.5,
             bgcolor="rgba(255,255,255,0.9)",
         ),
     )
