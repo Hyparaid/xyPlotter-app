@@ -936,8 +936,6 @@ with xy_tab:
         st.plotly_chart(fig, use_container_width=True)
 
 
-# ---------- Voltage–Time ----------
-# ---------- Voltage–Time ----------
 with vt_tab:
     st.subheader("Voltage–Time")
     tcol, vcol = G["time"], G["voltage"]
@@ -956,9 +954,9 @@ with vt_tab:
             if s.empty:
                 continue
 
-            # Build global, monotonic seconds using your helper
+            # Build global, monotonic seconds using YOUR helper
             s["_t"] = build_global_time_seconds(
-                s, time_col=tcol, cycle_col="Cycle Index", step_col="Step Type"
+            s, time_col=tcol, cycle_col="Cycle Index", step_col="Step Type"
             )
 
             s = s.dropna(subset=["_t", vcol]).sort_values("_t")
@@ -971,26 +969,24 @@ with vt_tab:
                 name=src,
                 mode=("lines+markers" if show_markers else "lines"),
                 line=dict(color=color_for_src(src), width=line_width),
-                marker=dict(size=marker_size),
+                marker=dict(size=marker_size)
             ))
 
         fig_vt.update_layout(
             template="plotly_white",
             xaxis_title=f"Time ({ABBR[unit]})",
             yaxis_title=vcol,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
         )
+       
 
         if show_grid:
             fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-
-        # Apply PPT style and show plot
-        style_for_ppt(fig_vt)
+        
         st.plotly_chart(fig_vt, use_container_width=True, config=CAMERA_CFG)
-
-        # High-res PNG download for PowerPoint
         add_ppt_download(fig_vt, filename_base="voltage_time")
+
 # ---------- Voltage–Capacity ----------
 with vq_tab:
     st.subheader("Voltage–Capacity")
