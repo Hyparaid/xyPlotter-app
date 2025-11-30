@@ -988,9 +988,9 @@ with vt_tab:
         if show_grid:
             fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        
-        st.plotly_chart(fig_vt, use_container_width=True, config=CAMERA_CFG)
+
         style_for_ppt(fig_vt)
+        st.plotly_chart(fig_vt, use_container_width=False, config=CAMERA_CFG)
         add_ppt_download(fig_vt, filename_base="voltage_time")
 
 # ---------- Voltage–Capacity ----------
