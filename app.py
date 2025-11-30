@@ -183,7 +183,7 @@ def style_for_ppt(fig):
             bgcolor="rgba(255,255,255,0.9)",
         ),
     )
-    # Axis borders + ticks (no grid change here)
+    # Axis borders + ticks (we *don’t* touch showgrid here)
     fig.update_xaxes(
         showline=True,
         linecolor="black",
@@ -207,18 +207,18 @@ def style_for_ppt(fig):
 def add_ppt_download(fig, filename_base: str):
     """
     High-res PNG download for PowerPoint.
-    Requires `kaleido` (pip install -U kaleido).
+    Requires `kaleido` in your env: pip install -U kaleido
     """
     import io
-
     buf = io.BytesIO()
+
     try:
         fig.write_image(
             buf,
             format="png",
             width=1600,   # pixels
             height=900,
-            scale=2,      # supersampling → crisp text
+            scale=2,      # supersampling → crisp text/lines
         )
     except Exception:
         st.info(
@@ -235,7 +235,6 @@ def add_ppt_download(fig, filename_base: str):
         file_name=f"{filename_base}.png",
         mime="image/png",
     )
-
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -938,6 +937,7 @@ with xy_tab:
 
 
 # ---------- Voltage–Time ----------
+# ---------- Voltage–Time ----------
 with vt_tab:
     st.subheader("Voltage–Time")
     tcol, vcol = G["time"], G["voltage"]
@@ -956,9 +956,9 @@ with vt_tab:
             if s.empty:
                 continue
 
-            # Build global, monotonic seconds using YOUR helper
+            # Build global, monotonic seconds using your helper
             s["_t"] = build_global_time_seconds(
-            s, time_col=tcol, cycle_col="Cycle Index", step_col="Step Type"
+                s, time_col=tcol, cycle_col="Cycle Index", step_col="Step Type"
             )
 
             s = s.dropna(subset=["_t", vcol]).sort_values("_t")
@@ -971,7 +971,7 @@ with vt_tab:
                 name=src,
                 mode=("lines+markers" if show_markers else "lines"),
                 line=dict(color=color_for_src(src), width=line_width),
-                marker=dict(size=marker_size)
+                marker=dict(size=marker_size),
             ))
 
         fig_vt.update_layout(
@@ -985,13 +985,12 @@ with vt_tab:
             fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-        # PPT style + interactive plot
+        # Apply PPT style and show plot
         style_for_ppt(fig_vt)
         st.plotly_chart(fig_vt, use_container_width=True, config=CAMERA_CFG)
 
-        # High-res PNG download
+        # High-res PNG download for PowerPoint
         add_ppt_download(fig_vt, filename_base="voltage_time")
-        
 # ---------- Voltage–Capacity ----------
 with vq_tab:
     st.subheader("Voltage–Capacity")
