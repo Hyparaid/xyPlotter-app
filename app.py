@@ -1429,16 +1429,7 @@ with dcir_tab:
                 pulses_per_soc = 2  # ignored in data mode
 
             run_btn = st.button("Compute DCIR")
-        with st.expander("DCIR pulse detection debug"):
-            df_src = data[data["__file"] == files_here[0]].copy()
-        # assume NDAX-normalized
-        grp = df_src.groupby("Step_Index").agg(
-        Status=("Step Type", "first"),
-        tmin=("Time", "min"),
-        tmax=("Time", "max"),
-    )
-        grp["duration_s"] = grp["tmax"] - grp["tmin"]
-        st.dataframe(grp.head(60))    
+        
         with right:
             st.markdown(
                 """
