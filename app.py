@@ -118,7 +118,7 @@ NV_COLORDICT = {
 PALETTES = {
     # Long, varied palette for multi-series plots (20+)
     "Preli long": [
-        NV_COLORDICT["nv_power_green"], NV_COLORDICT["nv_blue5"], "#b89bfd",
+        NV_COLORDICT["nv_power_green"], NV_COLORDICT["nv_blue5"], NV_COLORDICT["nv_blue1"],
         "#e7298a", "#0383a3", "#013824", "#c7e9b4", "#7fcdbb",
         "#d7301f", "#990000", NV_COLORDICT["nv_gray4"], NV_COLORDICT["nv_gray3"],
         NV_COLORDICT["nv_blue8"], "#6C88AD", "#5C9BBA",
