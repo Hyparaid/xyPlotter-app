@@ -13,6 +13,7 @@ import warnings
 import io
 import plotly.io as pio
 import plotly.graph_objects as go
+import math
 
 # ----------------------------
 # NDAX imports
@@ -611,160 +612,175 @@ def compute_dcir_for_ndax(
     soc_levels=None,                    # e.g. [80, 50, 20, 5] for design mode
     pulses_per_soc: int = 2,
     pre_rest_window_s: float = 60.0,    # last 60 s of rest
-    inst_window_s: float = 1.0,         # FIRST 1 s of pulse
-    end_window_s: float = 5.0,          # LAST 5 s of pulse
+    inst_window_s: float = 1.0,         # FIRST 1 s of pulse (instantaneous)
+    end_window_s: float = 5.0,          # LAST 5 s of pulse (end-of-pulse)
     pulse_tol_s: float = 2.0,           # tolerance for pulse duration
+    current_threshold_A: float = 0.001, # reject tiny-current noise
 ) -> pd.DataFrame:
     """
-    df MUST already be the NDAX-normalized DataFrame from your app
-    (i.e. after normalize_neware_headers + infer_rest_step).
+    DCIR from NDAX-like DataFrame.
+
+    df must have (after your normalize_neware_headers & infer_rest_step):
+      - 'Step_Index'
+      - 'Step Type'         (Rest / Chg / DChg / CCCV_Chg / CC_DChg / CC_Chg, etc.)
+      - 'Time'              (step-local seconds)
+      - 'Voltage(V)' or 'Voltage'
+      - 'Current(mA)'
+      - optional: 'Charge_Capacity(mAh)', 'Discharge_Capacity(mAh)'
 
     Returns one row per DCIR pulse with:
-        Cell_ID, Pulse_Direction, SoC_label, pulse_duration_s,
-        DCIR_<pulse_length>s_Ohm, DCIR_inst_Ohm
+      Cell_ID, Pulse_Direction, SoC_label, pulse_duration_s,
+      DCIR_<pulse_length>s_Ohm, DCIR_inst_Ohm
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
     d = df.copy()
+    cols = d.columns
 
-    # --- Expect the canonical columns your app creates ---
-    if "Step_Index" not in d.columns:
+    # --- column names (mapped to what your NDAX data actually has) ---
+    if "Step_Index" not in cols:
         raise ValueError("Expected 'Step_Index' column but did not find it.")
 
     step_index_col = "Step_Index"
+    status_col = "Step Type" if "Step Type" in cols else "Status"
     time_col = "Time"
-    volt_col = "Voltage(V)" if "Voltage(V)" in d.columns else "Voltage"
+    volt_col = "Voltage(V)" if "Voltage(V)" in cols else "Voltage"
     cur_col = "Current(mA)"
-    step_type_col = "Step Type"    # created by normalize_neware_headers
+    cycle_col = "Cycle Index" if "Cycle Index" in cols else "Cycle" if "Cycle" in cols else None
 
-    # Convert to numeric
-    d["__Time_s"] = pd.to_numeric(d[time_col], errors="coerce")
-    d["__Current_A"] = pd.to_numeric(d[cur_col], errors="coerce") / 1000.0
+    # --- numeric helpers ---
+    d[time_col] = pd.to_numeric(d[time_col], errors="coerce")
+    d["Current_A"] = pd.to_numeric(d[cur_col], errors="coerce") / 1000.0
 
-    # --- Summarise per step index ---
-    grp = d.groupby(step_index_col)
+    # --- summarise each Step_Index ---
     step_summary = (
-        grp.agg(
-            Status=(step_type_col, "first"),
-            time_min=("__Time_s", "min"),
-            time_max=("__Time_s", "max"),
-        )
-        .sort_index()
+        d.groupby(step_index_col)
+         .agg(
+             Status=(status_col, "first"),
+             tmin=(time_col, "min"),
+             tmax=(time_col, "max"),
+             I_mean=("Current_A", "mean"),
+         )
+         .sort_index()
     )
-    step_summary["duration_s"] = step_summary["time_max"] - step_summary["time_min"]
+    step_summary["duration_s"] = step_summary["tmax"] - step_summary["tmin"]
 
+    # --- pulse detection: duration ~ pulse_length, not Rest, non-zero current ---
     status_str = step_summary["Status"].astype(str).str.lower()
     is_rest = status_str.str.contains("rest")
-    is_cc   = status_str.str.contains("cc")   # matches CC_DChg, CC_Chg, CCCV_Chg
-    is_cv   = status_str.str.contains("cv")   # filter CCCV_Chg
 
-    # --- DCIR pulse candidates: CC only (no CV, no Rest) with right duration ---
-    approx_len = float(pulse_length_s)
-    len_ok = step_summary["duration_s"].between(
-        approx_len - pulse_tol_s,
-        approx_len + pulse_tol_s,
+    is_pulse_dur = step_summary["duration_s"].between(
+        pulse_length_s - pulse_tol_s,
+        pulse_length_s + pulse_tol_s,
     )
-    pulse_mask = is_cc & ~is_cv & ~is_rest & len_ok
+    enough_I = step_summary["I_mean"].abs() >= current_threshold_A
+
+    pulse_mask = (~is_rest) & is_pulse_dur & enough_I
     pulse_steps = step_summary.index[pulse_mask].tolist()
-    pulse_steps.sort()
 
     dcir_end_col = f"DCIR_{int(round(pulse_length_s))}s_Ohm"
 
     if not pulse_steps:
+        # No pulses found → return an empty-but-well-formed table
         return pd.DataFrame(
             columns=[
                 "Cell_ID",
                 "Pulse_Direction",
                 "SoC_label",
                 "pulse_duration_s",
-                "dcir_end_col",
+                dcir_end_col,
                 "DCIR_inst_Ohm",
             ]
         )
 
-    # --- SOC helpers ---
-    q_ref = None
-    if soc_mode == "data":
-        # Use the exact capacity columns you showed me
-        if "Discharge_Capacity(mAh)" in d.columns:
-            q_ref = pd.to_numeric(d["Discharge_Capacity(mAh)"], errors="coerce").max()
-        if (q_ref is None or not np.isfinite(q_ref) or q_ref <= 0) and \
-           "Charge_Capacity(mAh)" in d.columns:
-            q_ref = pd.to_numeric(d["Charge_Capacity(mAh)"], errors="coerce").max()
-        if not np.isfinite(q_ref) or q_ref <= 0:
-            q_ref = None
+    # --- SOC labelling helpers ---
 
-    # Design-based SOC map (80 / 50 / 20 / 5 etc.)
-    soc_map = {}
+    # Option 1: design-based SOC (user gives 80, 50, 20, 5; pulses_per_soc=2)
+    soc_labels_by_step = {}
     if soc_mode == "design" and soc_levels:
         expanded = []
         for lvl in soc_levels:
             expanded.extend([lvl] * pulses_per_soc)
-        for i, step in enumerate(pulse_steps):
-            soc_map[step] = expanded[i] if i < len(expanded) else expanded[-1]
+        for i, step in enumerate(sorted(pulse_steps)):
+            soc_labels_by_step[step] = expanded[i] if i < len(expanded) else expanded[-1]
+
+    # Option 2: data-based SOC from capacity columns
+    q_ref = None
+    if soc_mode == "data":
+        if "Discharge_Capacity(mAh)" in cols:
+            q_ref = pd.to_numeric(d["Discharge_Capacity(mAh)"], errors="coerce").max()
+        if (q_ref is None or not math.isfinite(q_ref) or q_ref <= 0) and \
+           "Charge_Capacity(mAh)" in cols:
+            q_ref = pd.to_numeric(d["Charge_Capacity(mAh)"], errors="coerce").max()
+        if q_ref is not None and (not math.isfinite(q_ref) or q_ref <= 0):
+            q_ref = None
+
+    # --- precompute which Step_Indexes are Rest for rest-step lookup ---
+    rest_steps = step_summary.index[is_rest]
 
     records = []
 
-    for step in pulse_steps:
+    for step in sorted(pulse_steps):
         step_info = step_summary.loc[step]
 
-        # --- Find preceding Rest step ---
-        prior_steps = step_summary.index[step_summary.index < step]
-        prior_rest_steps = [s for s in prior_steps if is_rest.loc[s]]
-        if not prior_rest_steps:
+        # ----- find preceding Rest step -----
+        prior_rests = rest_steps[rest_steps < step]
+        if len(prior_rests) == 0:
             continue
-        rest_step = prior_rest_steps[-1]
+        rest_step = prior_rests[-1]
 
         df_rest = d[d[step_index_col] == rest_step]
         df_pulse = d[d[step_index_col] == step]
         if df_rest.empty or df_pulse.empty:
             continue
 
-        # --- Pre-pulse OCV: last pre_rest_window_s of Rest step ---
-        rest_tmin = df_rest["__Time_s"].min()
-        rest_tmax = df_rest["__Time_s"].max()
-        rest_start = max(rest_tmin, rest_tmax - pre_rest_window_s)
-        rest_win = df_rest[df_rest["__Time_s"] >= rest_start]
+        # ----- pre-pulse OCV: last pre_rest_window_s of rest -----
+        rt_max = df_rest[time_col].max()
+        rt_min = df_rest[time_col].min()
+        rest_start = max(rt_min, rt_max - pre_rest_window_s)
+        rest_win = df_rest[df_rest[time_col] >= rest_start]
         if rest_win.empty:
             rest_win = df_rest
 
         v_rest = pd.to_numeric(rest_win[volt_col], errors="coerce").mean()
-        i_rest = df_rest["__Current_A"].mean()
+        i_rest = df_rest["Current_A"].mean()
 
-        # --- Instant window: first inst_window_s of pulse ---
-        p_tmin = df_pulse["__Time_s"].min()
-        inst_end = p_tmin + inst_window_s
-        inst_win = df_pulse[df_pulse["__Time_s"] <= inst_end]
+        # ----- instantaneous window: first inst_window_s of pulse -----
+        pt_min = df_pulse[time_col].min()
+        inst_end = pt_min + inst_window_s
+        inst_win = df_pulse[df_pulse[time_col] <= inst_end]
         if inst_win.empty:
             inst_win = df_pulse.iloc[[0]]
 
         v_inst = pd.to_numeric(inst_win[volt_col], errors="coerce").mean()
-        i_inst = inst_win["__Current_A"].mean()
+        i_inst = inst_win["Current_A"].mean()
 
-        # --- End-of-pulse window: last end_window_s of pulse ---
-        p_tmax = df_pulse["__Time_s"].max()
-        end_start = max(p_tmin, p_tmax - end_window_s)
-        end_win = df_pulse[df_pulse["__Time_s"] >= end_start]
+        # ----- end-of-pulse window: last end_window_s of pulse -----
+        pt_max = df_pulse[time_col].max()
+        end_start = max(pt_min, pt_max - end_window_s)
+        end_win = df_pulse[df_pulse[time_col] >= end_start]
         if end_win.empty:
             end_win = df_pulse.iloc[[-1]]
 
         v_end = pd.to_numeric(end_win[volt_col], errors="coerce").mean()
-        i_end = end_win["__Current_A"].mean()
+        i_end = end_win["Current_A"].mean()
 
-        # --- DCIR values ---
-        delta_i_inst = i_inst - i_rest
-        delta_i_end  = i_end  - i_rest
+        # ----- DCIR values -----
+        dv_inst = v_inst - v_rest
+        di_inst = i_inst - i_rest
+        dv_end = v_end - v_rest
+        di_end = i_end - i_rest
 
-        dcir_inst = np.nan
-        dcir_end  = np.nan
-        if abs(delta_i_inst) > 0:
-            dcir_inst = (v_inst - v_rest) / delta_i_inst
-        if abs(delta_i_end) > 0:
-            dcir_end = (v_end - v_rest) / delta_i_end
+        dcir_inst = math.nan
+        dcir_end = math.nan
+        if abs(di_inst) > 0:
+            dcir_inst = dv_inst / di_inst
+        if abs(di_end) > 0:
+            dcir_end = dv_end / di_end
 
-        # Pulse direction from sign of current
-        pulse_i_mean = df_pulse["__Current_A"].mean()
+        # Direction from current sign
+        pulse_i_mean = df_pulse["Current_A"].mean()
         if pulse_i_mean > 0:
             direction = "charge"
         elif pulse_i_mean < 0:
@@ -772,21 +788,21 @@ def compute_dcir_for_ndax(
         else:
             direction = "unknown"
 
-        # --- SOC label ---
+        # ----- SOC label -----
         soc_label = None
 
         if soc_mode == "design" and soc_levels:
-            soc_label = soc_map.get(step, None)
+            soc_label = soc_labels_by_step.get(step, None)
 
         elif soc_mode == "data" and q_ref and q_ref > 0:
             first_row = df_pulse.iloc[0]
-            if direction == "discharge":
-                q = float(first_row.get("Discharge_Capacity(mAh)", np.nan))
-                if np.isfinite(q):
+            if direction == "discharge" and "Discharge_Capacity(mAh)" in cols:
+                q = float(first_row["Discharge_Capacity(mAh)"])
+                if math.isfinite(q):
                     soc_label = 100.0 * (1.0 - q / q_ref)
-            elif direction == "charge":
-                q = float(first_row.get("Charge_Capacity(mAh)", np.nan))
-                if np.isfinite(q):
+            elif direction == "charge" and "Charge_Capacity(mAh)" in cols:
+                q = float(first_row["Charge_Capacity(mAh)"])
+                if math.isfinite(q):
                     soc_label = 100.0 * (q / q_ref)
             if soc_label is not None:
                 soc_label = round(soc_label, 1)
@@ -797,12 +813,13 @@ def compute_dcir_for_ndax(
                 "Pulse_Direction": direction,
                 "SoC_label": soc_label,
                 "pulse_duration_s": round(float(step_info["duration_s"]), 3),
-                "dcir_end_col": dcir_end,
+                dcir_end_col: dcir_end,
                 "DCIR_inst_Ohm": dcir_inst,
             }
         )
 
     return pd.DataFrame.from_records(records)
+
 
 
 # ----------------------------
