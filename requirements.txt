@@ -5,3 +5,4 @@ plotly==5.22.0
 NewareNDA==2025.10.1
 pillow==10.2
 kaleido==0.2.1
+XlsxWriter==3.2.0
