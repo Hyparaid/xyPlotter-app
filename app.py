@@ -678,7 +678,7 @@ def compute_dcir_for_ndax(
                 "Pulse_Direction",
                 "SoC_label",
                 "pulse_duration_s",
-                dcir_end_col,
+                "dcir_end_col",
                 "DCIR_inst_Ohm",
             ]
         )
@@ -797,7 +797,7 @@ def compute_dcir_for_ndax(
                 "Pulse_Direction": direction,
                 "SoC_label": soc_label,
                 "pulse_duration_s": round(float(step_info["duration_s"]), 3),
-                dcir_end_col: dcir_end,
+                "dcir_end_col": dcir_end,
                 "DCIR_inst_Ohm": dcir_inst,
             }
         )
@@ -1366,7 +1366,16 @@ with ce_tab:
         # ---------- DCIR from NDAX ----------
 with dcir_tab:
     st.subheader("DCIR calculator")
-
+with st.expander("DCIR pulse detection debug"):
+    df_src = data[data["__file"] == files_here[0]].copy()
+    # assume NDAX-normalized
+    grp = df_src.groupby("Step_Index").agg(
+        Status=("Step Type", "first"),
+        tmin=("Time", "min"),
+        tmax=("Time", "max"),
+    )
+    grp["duration_s"] = grp["tmax"] - grp["tmin"]
+    st.dataframe(grp.head(60))    
     files_here = sorted(data["__file"].astype(str).unique().tolist())
     if not files_here:
         st.info("No NDAX data available for DCIR.")
@@ -1433,6 +1442,7 @@ with dcir_tab:
                 if df_src.empty:
                     continue
 
+                    
                 try:
                     res = compute_dcir_for_ndax(
                         df=df_src,
