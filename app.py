@@ -1470,25 +1470,75 @@ with dcir_tab:
             if all_results:
                 dcir_results = pd.concat(all_results, ignore_index=True)
 
-                st.subheader("DCIR results")
+                # --- show raw table ---
+                st.subheader("DCIR results (raw, one row per pulse)")
                 st.dataframe(dcir_results)
 
-                # Excel download
+                # --- build pivot: SoC labels as columns, value = DCIR_18s_Ohm ---
+                dcir_end_col = f"DCIR_{int(round(pulse_length_s))}s_Ohm"
+
+                pivot_18 = None
+                if "SoC_label" in dcir_results.columns and dcir_end_col in dcir_results.columns:
+                    pivot_18 = (
+                    dcir_results
+                    .pivot_table(
+                        index=["Cell_ID", "Pulse_Direction"],
+                        columns="SoC_label",
+                        values=dcir_end_col,
+                        aggfunc="mean",
+                    )
+                    .reset_index()
+                )
+
+                # sort SoC columns numerically if possible
+                    soc_cols = [c for c in pivot_18.columns if c not in ["Cell_ID", "Pulse_Direction"]]
+
+                    def soc_key(x):
+                        try:
+                            return float(str(x).replace("%", ""))
+                        except Exception:
+                            return float("inf")
+
+                    soc_cols_sorted = sorted(soc_cols, key=soc_key)
+                    pivot_18 = pivot_18[["Cell_ID", "Pulse_Direction"] + soc_cols_sorted]
+
+                    # rename SoC columns to have a % sign
+                    rename_map = {}
+                    for c in soc_cols_sorted:
+                        label = str(c)
+                        try:
+                            # if it's numeric (80.0, 50.0, ...) make it '80%'
+                            f = float(label)
+                            label = f"{f:g}%"
+                        except Exception:
+                            # if it already has %, leave as-is or append one
+                            if not label.endswith("%"):
+                                label = label + "%"
+                        rename_map[c] = label
+
+                    pivot_18 = pivot_18.rename(columns=rename_map)
+
+                    st.subheader(f"DCIR {int(round(pulse_length_s))}s (SoC as columns)")
+                    st.dataframe(pivot_18)
+                else:
+                    st.info("Could not build pivoted table – missing SoC_label or DCIR column.")
+
+                # --- Excel download: raw + pivot ---
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                    dcir_results.to_excel(
-                        writer, index=False, sheet_name="DCIR"
-                    )
-                output.seek(0)
+                    dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
+                    if pivot_18 is not None:
+                        pivot_18.to_excel(writer, index=False, sheet_name=f"DCIR_{int(round(pulse_length_s))}s")
 
+                output.seek(0)
                 st.download_button(
-                    label="⬇️ Download DCIR table (Excel)",
+                    label="⬇️ Download DCIR tables (Excel)",
                     data=output,
                     file_name="dcir_results.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             else:
-                st.info("No DCIR pulses detected. Check the pulse length or your NDAX file.")
+                    st.info("No DCIR pulses detected. Check the pulse length or your NDAX file.")
 
 # ---------- Box plots ----------
 # with box_tab:
