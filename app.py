@@ -1406,20 +1406,27 @@ with dcir_tab:
                 index=0,
             )
 
-            if soc_mode_label.startswith("By test"):
+            # same widgets always visible → no layout jump
+            design_mode = soc_mode_label.startswith("By test")
+            disabled_design = not design_mode
+
+            soc_levels_text = st.text_input(
+                "SOC levels (%) in pulse order",
+                value="80, 50, 20, 5",
+                help="Example: 80, 50, 20, 5 with 2 pulses per SOC → 8 pulses total.",
+                disabled=disabled_design,
+            )
+            pulses_per_soc = st.number_input(
+                "Pulses per SOC level",
+                min_value=1,
+                max_value=10,
+                value=2,
+                step=1,
+                disabled=disabled_design,
+            )
+
+            if design_mode:
                 soc_mode = "design"
-                soc_levels_text = st.text_input(
-                    "SOC levels (%) in pulse order",
-                    value="80, 50, 20, 5",
-                    help="Example: 80, 50, 20, 5 with 2 pulses per SOC → 8 pulses total.",
-                )
-                pulses_per_soc = st.number_input(
-                    "Pulses per SOC level",
-                    min_value=1,
-                    max_value=10,
-                    value=2,
-                    step=1,
-                )
                 soc_levels = [
                     float(x.strip())
                     for x in soc_levels_text.split(",")
@@ -1427,8 +1434,7 @@ with dcir_tab:
                 ]
             else:
                 soc_mode = "data"
-                soc_levels = None
-                pulses_per_soc = 2  # ignored in data mode
+                soc_levels = None  # we ignore pulses_per_soc in data mode
 
             run_btn = st.button("Compute DCIR")
 
@@ -1461,7 +1467,7 @@ with dcir_tab:
                         pulse_length_s=pulse_length_s,
                         soc_mode=soc_mode,
                         soc_levels=soc_levels,
-                        pulses_per_soc=pulses_per_soc,
+                        pulses_per_soc=int(pulses_per_soc),
                     )
                 except Exception as e:
                     st.warning(f"Skipping {src} due to error: {e}")
@@ -1577,7 +1583,6 @@ with dcir_tab:
                     "No DCIR pulses detected in the loaded files. "
                     "Check the pulse length or SOC design inputs."
                 )
-
 
    # ---------- Box plots ----------
 # with box_tab:
