@@ -1380,7 +1380,8 @@ with ce_tab:
         st.plotly_chart(fig_ce, use_container_width=False, config=CAMERA_CFG)
         add_ppt_download(fig_ce, filename_base="CE & Capacity")
 
-        # ---------- DCIR from NDAX ----------
+# ---------- DCIR  ----------
+#----------------------------
 with dcir_tab:
     st.subheader("DCIR calculator")
 
@@ -1429,16 +1430,16 @@ with dcir_tab:
                 pulses_per_soc = 2  # ignored in data mode
 
             run_btn = st.button("Compute DCIR")
-        
+
         with right:
             st.markdown(
                 """
 **How this works :**
 
 - Pre-rest OCV = mean _Voltage_ over last **60 s** of the Rest step.
-- **Instantaneous DCIR** = ΔV/ΔI using first **1 s** of the pulse.
+- **Instantaneous DCIR** = ΔV/ΔI using an early time window (e.g. 0.5–1.5 s).
 - **End-of-pulse DCIR** = ΔV/ΔI using last **5 s** of the pulse.
-- Pulses are detected as **CC** steps with duration ≈ your pulse length.
+- Pulses are detected as non-Rest steps with duration ≈ your pulse length.
                 """
             )
 
@@ -1450,7 +1451,6 @@ with dcir_tab:
                 if df_src.empty:
                     continue
 
-                    
                 try:
                     res = compute_dcir_for_ndax(
                         df=df_src,
@@ -1467,106 +1467,113 @@ with dcir_tab:
                 if res is not None and not res.empty:
                     all_results.append(res)
 
-if all_results:
-    dcir_results = pd.concat(all_results, ignore_index=True)
+            # ---------- from here down is INDENTED inside if run_btn ----------
+            if all_results:
+                dcir_results = pd.concat(all_results, ignore_index=True)
 
-    # ---------- 1) Show raw pulse table ----------
-    st.subheader("DCIR results (raw, one row per pulse)")
-    st.dataframe(dcir_results)
+                # ---------- 1) Show raw pulse table ----------
+                st.subheader("DCIR results (raw, one row per pulse)")
+                st.dataframe(dcir_results)
 
-    # ---------- 2) Build summary: SoC columns for inst + 18s ----------
-    dcir_end_col = f"DCIR_{int(round(pulse_length_s))}s_Ohm"
+                # ---------- 2) Build summary: SoC columns for inst + 18s ----------
+                dcir_end_col = f"DCIR_{int(round(pulse_length_s))}s_Ohm"
 
-    wide_summary = None
-    if (
-        "SoC_label" in dcir_results.columns
-        and dcir_end_col in dcir_results.columns
-        and "DCIR_inst_Ohm" in dcir_results.columns
-    ):
-        tmp = dcir_results.copy()
+                wide_summary = None
+                if (
+                    "SoC_label" in dcir_results.columns
+                    and dcir_end_col in dcir_results.columns
+                    and "DCIR_inst_Ohm" in dcir_results.columns
+                ):
+                    tmp = dcir_results.copy()
 
-        # nice SoC strings like "80%"
-        def soc_fmt(x):
-            s = str(x)
-            try:
-                v = float(s.replace("%", ""))
-                return f"{v:g}%"
-            except Exception:
-                return s
+                    # nice SoC strings like "80%"
+                    def soc_fmt(x):
+                        s = str(x)
+                        try:
+                            v = float(s.replace("%", ""))
+                            return f"{v:g}%"
+                        except Exception:
+                            return s
 
-        tmp["SoC_fmt"] = tmp["SoC_label"].apply(soc_fmt)
+                    tmp["SoC_fmt"] = tmp["SoC_label"].apply(soc_fmt)
 
-        # melt both metrics into long format
-        metric_map = {
-            dcir_end_col: "18s",
-            "DCIR_inst_Ohm": "inst",
-        }
+                    metric_map = {
+                        dcir_end_col: "18s",
+                        "DCIR_inst_Ohm": "inst",
+                    }
 
-        long = tmp.melt(
-            id_vars=["Cell_ID", "Pulse_Direction", "SoC_fmt"],
-            value_vars=list(metric_map.keys()),
-            var_name="metric",
-            value_name="DCIR",
-        )
-        long["metric_suffix"] = long["metric"].map(metric_map)
+                    long = tmp.melt(
+                        id_vars=["Cell_ID", "Pulse_Direction", "SoC_fmt"],
+                        value_vars=list(metric_map.keys()),
+                        var_name="metric",
+                        value_name="DCIR",
+                    )
+                    long["metric_suffix"] = long["metric"].map(metric_map)
 
-        # column name like "80%_inst" or "80%_18s"
-        long["column_name"] = long["SoC_fmt"] + "_" + long["metric_suffix"]
+                    # column name like "80%_inst" or "80%_18s"
+                    long["column_name"] = long["SoC_fmt"] + "_" + long["metric_suffix"]
 
-        # pivot to wide: one row per Cell_ID + direction
-        wide = long.pivot_table(
-            index=["Cell_ID", "Pulse_Direction"],
-            columns="column_name",
-            values="DCIR",
-            aggfunc="mean",
-        )
+                    wide = long.pivot_table(
+                        index=["Cell_ID", "Pulse_Direction"],
+                        columns="column_name",
+                        values="DCIR",
+                        aggfunc="mean",
+                    ).reset_index()
 
-        wide = wide.reset_index()
+                    value_cols = [
+                        c for c in wide.columns
+                        if c not in ["Cell_ID", "Pulse_Direction"]
+                    ]
 
-        # order columns: first all inst (80/50/20/5), then all 18s (80/50/20/5)
-        value_cols = [c for c in wide.columns if c not in ["Cell_ID", "Pulse_Direction"]]
+                    import math
 
-        import math
+                    def sort_key(col):
+                        if "_" in col:
+                            soc_part, suffix = col.split("_", 1)
+                        else:
+                            soc_part, suffix = col, ""
+                        try:
+                            soc_num = float(soc_part.replace("%", ""))
+                        except Exception:
+                            soc_num = math.inf
+                        metric_order = {"inst": 0, "18s": 1}
+                        return (metric_order.get(suffix, 2), soc_num)
 
-        def sort_key(col):
-            if "_" in col:
-                soc_part, suffix = col.split("_", 1)
+                    value_cols_sorted = sorted(value_cols, key=sort_key)
+                    wide_summary = wide[["Cell_ID", "Pulse_Direction"] + value_cols_sorted]
+
+                    st.subheader(
+                        f"DCIR summary (instant + {int(round(pulse_length_s))}s, SoC as columns)"
+                    )
+                    st.dataframe(wide_summary)
+                else:
+                    st.info(
+                        "Could not build summary table – missing SoC_label or DCIR columns."
+                    )
+                    wide_summary = None
+
+                # ---------- 3) Excel: raw + summary on one file ----------
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                    dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
+                    if wide_summary is not None:
+                        wide_summary.to_excel(
+                            writer, index=False, sheet_name="DCIR_summary"
+                        )
+
+                output.seek(0)
+                st.download_button(
+                    label="⬇️ Download DCIR tables (Excel)",
+                    data=output,
+                    file_name="dcir_results.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
             else:
-                soc_part, suffix = col, ""
-            try:
-                soc_num = float(soc_part.replace("%", ""))
-            except Exception:
-                soc_num = math.inf
-            metric_order = {"inst": 0, "18s": 1}
-            return (metric_order.get(suffix, 2), soc_num)
+                st.info(
+                    "No DCIR pulses detected in the selected files. "
+                    "Check the pulse length or SOC design inputs."
+                )
 
-        value_cols_sorted = sorted(value_cols, key=sort_key)
-        wide_summary = wide[["Cell_ID", "Pulse_Direction"] + value_cols_sorted]
-
-        st.subheader(
-            f"DCIR summary (instant + {int(round(pulse_length_s))}s, SoC as columns)"
-        )
-        st.dataframe(wide_summary)
-    else:
-        st.info("Could not build summary table – missing SoC_label or DCIR columns.")
-        wide_summary = None
-
-    # ---------- 3) Excel: raw + summary on one file ----------
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
-        if wide_summary is not None:
-            wide_summary.to_excel(writer, index=False, sheet_name="DCIR_summary")
-
-    output.seek(0)
-    st.download_button(
-        label="⬇️ Download DCIR tables (Excel)",
-        data=output,
-        file_name="dcir_results.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-else:
-    st.info("No DCIR pulses detected. Check the pulse length or your NDAX file.")
 
 # ---------- Box plots ----------
 # with box_tab:
