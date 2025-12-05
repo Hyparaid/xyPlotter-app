@@ -1385,6 +1385,10 @@ with ce_tab:
 with dcir_tab:
     st.subheader("DCIR calculator")
 
+    if "dcir_results" not in st.session_state:
+        st.session_state["dcir_results"] = None
+        st.session_state["dcir_summary"] = None
+
     files_here = sorted(data["__file"].astype(str).unique().tolist())
     if not files_here:
         st.info("No NDAX data available for DCIR.")
@@ -1467,15 +1471,10 @@ with dcir_tab:
                 if res is not None and not res.empty:
                     all_results.append(res)
 
-            # ---------- from here down is INDENTED inside if run_btn ----------
+            # ----- UPDATE SESSION STATE, don't display directly here -----
             if all_results:
                 dcir_results = pd.concat(all_results, ignore_index=True)
 
-                # ---------- 1) Show raw pulse table ----------
-                st.subheader("DCIR results (raw, one row per pulse)")
-                st.dataframe(dcir_results)
-
-                # ---------- 2) Build summary: SoC columns for inst + 18s ----------
                 dcir_end_col = f"DCIR_{int(round(pulse_length_s))}s_Ohm"
 
                 wide_summary = None
@@ -1541,35 +1540,54 @@ with dcir_tab:
 
                     value_cols_sorted = sorted(value_cols, key=sort_key)
                     wide_summary = wide[["Cell_ID", "Pulse_Direction"] + value_cols_sorted]
-
-                    st.subheader(
-                        f"DCIR summary (instant + {int(round(pulse_length_s))}s, SoC as columns)"
-                    )
-                    st.dataframe(wide_summary)
                 else:
-                    st.info(
-                        "Could not build summary table – missing SoC_label or DCIR columns."
-                    )
                     wide_summary = None
 
-                # ---------- 3) Excel: raw + summary on one file ----------
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                    dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
-                    if wide_summary is not None:
-                        wide_summary.to_excel(
-                            writer, index=False, sheet_name="DCIR_summary"
-                        )
+                # store in session_state so it survives reruns
+                st.session_state["dcir_results"] = dcir_results
+                st.session_state["dcir_summary"] = wide_summary
 
-                output.seek(0)
-                st.download_button(
-                    label="⬇️ Download DCIR tables (Excel)",
-                    data=output,
-                    file_name="dcir_results.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
             else:
+                st.session_state["dcir_results"] = None
+                st.session_state["dcir_summary"] = None
                 st.info(
+                    "No DCIR pulses detected in the selected NDAX files. "
+                    "Check the pulse length or SOC design inputs."
+                )
+
+    # ----- OUTSIDE if run_btn, always display from session_state -----
+    dcir_results = st.session_state.get("dcir_results")
+    wide_summary = st.session_state.get("dcir_summary")
+
+    if dcir_results is not None:
+        st.subheader("DCIR results (raw, one row per pulse)")
+        st.dataframe(dcir_results)
+
+        if wide_summary is not None:
+            st.subheader(
+                f"DCIR summary (instant + {int(round(pulse_length_s))}s, SoC as columns)"
+            )
+            st.dataframe(wide_summary)
+
+        # Excel: raw + summary on one file
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
+            if wide_summary is not None:
+                wide_summary.to_excel(
+                    writer, index=False, sheet_name="DCIR_summary"
+                )
+
+        output.seek(0)
+        st.download_button(
+            label="⬇️ Download DCIR tables (Excel)",
+            data=output,
+            file_name="dcir_results.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    else:
+        st.info(
                     "No DCIR pulses detected in the selected files. "
                     "Check the pulse length or SOC design inputs."
                 )
