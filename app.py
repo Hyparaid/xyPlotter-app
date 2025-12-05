@@ -1385,6 +1385,7 @@ with ce_tab:
 with dcir_tab:
     st.subheader("DCIR calculator")
 
+    # Persistent storage for DCIR results to avoid jitter on reruns
     if "dcir_results" not in st.session_state:
         st.session_state["dcir_results"] = None
         st.session_state["dcir_summary"] = None
@@ -1441,12 +1442,13 @@ with dcir_tab:
 **How this works :**
 
 - Pre-rest OCV = mean _Voltage_ over last **60 s** of the Rest step.
-- **Instantaneous DCIR** = ΔV/ΔI using an early time window (e.g. 0.5–1.5 s).
+- **Instantaneous DCIR** = ΔV/ΔI using an early time window (e.g. 0.5–1.5 s into the pulse).
 - **End-of-pulse DCIR** = ΔV/ΔI using last **5 s** of the pulse.
-- Pulses are detected as non-Rest steps with duration ≈ your pulse length.
+- Pulses are detected as non-Rest steps with duration ≈ your pulse length and non-zero current.
                 """
             )
 
+        # ---------- COMPUTE when button is pressed ----------
         if run_btn:
             all_results = []
 
@@ -1471,7 +1473,6 @@ with dcir_tab:
                 if res is not None and not res.empty:
                     all_results.append(res)
 
-            # ----- UPDATE SESSION STATE, don't display directly here -----
             if all_results:
                 dcir_results = pd.concat(all_results, ignore_index=True)
 
@@ -1543,7 +1544,7 @@ with dcir_tab:
                 else:
                     wide_summary = None
 
-                # store in session_state so it survives reruns
+                # store in session_state so results survive reruns (e.g. changing radio)
                 st.session_state["dcir_results"] = dcir_results
                 st.session_state["dcir_summary"] = wide_summary
 
@@ -1555,7 +1556,7 @@ with dcir_tab:
                     "Check the pulse length or SOC design inputs."
                 )
 
-    # ----- OUTSIDE if run_btn, always display from session_state -----
+    # ---------- DISPLAY (always) from session_state, no jitter ----------
     dcir_results = st.session_state.get("dcir_results")
     wide_summary = st.session_state.get("dcir_summary")
 
@@ -1569,7 +1570,8 @@ with dcir_tab:
             )
             st.dataframe(wide_summary)
 
-        # Excel: raw + summary on one file
+        import io
+
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
