@@ -612,7 +612,7 @@ def compute_dcir_for_ndax(
     soc_levels=None,                    # e.g. [80, 50, 20, 5] for design mode
     pulses_per_soc: int = 2,
     pre_rest_window_s: float = 60.0,    # last 60 s of rest
-    inst_window_s=(0.5, 1.5),           # instant = 0.5–1.5 s into pulse (like your scripts)
+    inst_window_s=(0.5, 1.5),           # instant = 0.5–1.5 s into pulse
     end_window_s: float = 5.0,          # last 5 s of pulse
     pulse_tol_s: float = 2.0,           # duration tolerance
     current_threshold_A: float = 0.001, # reject tiny-current noise
@@ -626,7 +626,7 @@ def compute_dcir_for_ndax(
       - 'Time'              (step-local seconds)
       - 'Voltage(V)' or 'Voltage'
       - 'Current(mA)'
-      - optional: 'Charge_Capacity(mAh)', 'Discharge_Capacity(mAh)'
+      - optional: 'Discharge_Capacity(mAh)', 'Charge_Capacity(mAh)'
 
     Returns one row per DCIR pulse with:
       Cell_ID, Pulse_Direction, SoC_label, pulse_duration_s,
@@ -703,16 +703,22 @@ def compute_dcir_for_ndax(
         for i, step in enumerate(sorted(pulse_steps)):
             soc_labels_by_step[step] = expanded[i] if i < len(expanded) else expanded[-1]
 
-    # Data-based SOC from capacity
+    # Data-based SOC from capacity at PRECEDING REST step
     q_ref = None
+    q_ref_source = None  # "discharge" or "charge"
     if soc_mode == "data":
         if "Discharge_Capacity(mAh)" in cols:
             q_ref = pd.to_numeric(d["Discharge_Capacity(mAh)"], errors="coerce").max()
+            if math.isfinite(q_ref) and q_ref > 0:
+                q_ref_source = "discharge"
         if (q_ref is None or not math.isfinite(q_ref) or q_ref <= 0) and \
            "Charge_Capacity(mAh)" in cols:
             q_ref = pd.to_numeric(d["Charge_Capacity(mAh)"], errors="coerce").max()
+            if math.isfinite(q_ref) and q_ref > 0:
+                q_ref_source = "charge"
         if q_ref is not None and (not math.isfinite(q_ref) or q_ref <= 0):
             q_ref = None
+            q_ref_source = None
 
     rest_steps = step_summary.index[is_rest]
     inst_start, inst_end = inst_window_s
@@ -749,7 +755,6 @@ def compute_dcir_for_ndax(
             (df_pulse[time_col] >= inst_start) & (df_pulse[time_col] <= inst_end)
         ]
         if inst.empty:
-            # fallback: first few points if time grid is weird
             inst = df_pulse.head(min(3, len(df_pulse)))
 
         v_inst = pd.to_numeric(inst[volt_col], errors="coerce").mean()
@@ -766,7 +771,7 @@ def compute_dcir_for_ndax(
         v_end = pd.to_numeric(end_win[volt_col], errors="coerce").mean()
         i_end_mA = pd.to_numeric(end_win[cur_col], errors="coerce").mean()
 
-        # ---------- ΔV / ΔI (match your SAFT/POCO scripts) ----------
+        # ---------- ΔV / ΔI (same as your SAFT/POCO scripts) ----------
         delta_V_inst = v_pre - v_inst
         delta_I_inst_A = (i_inst_mA - i_pre_mA) / 1000.0
 
@@ -796,18 +801,20 @@ def compute_dcir_for_ndax(
         if soc_mode == "design" and soc_levels:
             soc_label = soc_labels_by_step.get(step, None)
 
-        elif soc_mode == "data" and q_ref and q_ref > 0:
-            first_row = df_pulse.iloc[0]
-            if direction == "discharge" and "Discharge_Capacity(mAh)" in cols:
-                q = float(first_row["Discharge_Capacity(mAh)"])
-                if math.isfinite(q):
-                    soc_label = 100.0 * (1.0 - q / q_ref)
-            elif direction == "charge" and "Charge_Capacity(mAh)" in cols:
-                q = float(first_row["Charge_Capacity(mAh)"])
-                if math.isfinite(q):
-                    soc_label = 100.0 * (q / q_ref)
+        elif soc_mode == "data" and q_ref and q_ref_source:
+            # Use capacity at PRECEDING REST as SOC indicator
+            q_rest = None
+            if q_ref_source == "discharge" and "Discharge_Capacity(mAh)" in cols:
+                q_rest = pd.to_numeric(df_rest["Discharge_Capacity(mAh)"], errors="coerce").max()
+                if math.isfinite(q_rest):
+                    soc_label = 100.0 * (1.0 - q_rest / q_ref)
+            elif q_ref_source == "charge" and "Charge_Capacity(mAh)" in cols:
+                q_rest = pd.to_numeric(df_rest["Charge_Capacity(mAh)"], errors="coerce").max()
+                if math.isfinite(q_rest):
+                    soc_label = 100.0 * (q_rest / q_ref)
+
             if soc_label is not None:
-                soc_label = round(soc_label, 1)
+                soc_label = round(float(soc_label), 1)
 
         records.append(
             {
@@ -821,6 +828,7 @@ def compute_dcir_for_ndax(
         )
 
     return pd.DataFrame.from_records(records)
+
 
 # ----------------------------
 # NDAX-only loader
