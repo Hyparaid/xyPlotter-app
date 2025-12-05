@@ -1385,17 +1385,13 @@ with ce_tab:
 with dcir_tab:
     st.subheader("DCIR calculator")
 
-    # Persistent storage for DCIR results to avoid jitter on reruns
-    if "dcir_results" not in st.session_state:
-        st.session_state["dcir_results"] = None
-        st.session_state["dcir_summary"] = None
-
     files_here = sorted(data["__file"].astype(str).unique().tolist())
     if not files_here:
         st.info("No NDAX data available for DCIR.")
     else:
         left, right = st.columns([1.2, 1])
 
+        # ---------------- LEFT: inputs ----------------
         with left:
             pulse_length_s = st.number_input(
                 "DCIR pulse length [s]",
@@ -1436,6 +1432,7 @@ with dcir_tab:
 
             run_btn = st.button("Compute DCIR")
 
+        # ---------------- RIGHT: explanation ----------------
         with right:
             st.markdown(
                 """
@@ -1448,7 +1445,7 @@ with dcir_tab:
                 """
             )
 
-        # ---------- COMPUTE when button is pressed ----------
+        # ---------------- RUN COMPUTE ONLY WHEN BUTTON IS PRESSED ----------------
         if run_btn:
             all_results = []
 
@@ -1476,6 +1473,11 @@ with dcir_tab:
             if all_results:
                 dcir_results = pd.concat(all_results, ignore_index=True)
 
+                # ---------- 1) Show raw pulse table ----------
+                st.subheader("DCIR results (raw, one row per pulse)")
+                st.dataframe(dcir_results)
+
+                # ---------- 2) Build summary: SoC columns for inst + 18s ----------
                 dcir_end_col = f"DCIR_{int(round(pulse_length_s))}s_Ohm"
 
                 wide_summary = None
@@ -1497,6 +1499,7 @@ with dcir_tab:
 
                     tmp["SoC_fmt"] = tmp["SoC_label"].apply(soc_fmt)
 
+                    # melt both metrics into long format
                     metric_map = {
                         dcir_end_col: "18s",
                         "DCIR_inst_Ohm": "inst",
@@ -1513,6 +1516,7 @@ with dcir_tab:
                     # column name like "80%_inst" or "80%_18s"
                     long["column_name"] = long["SoC_fmt"] + "_" + long["metric_suffix"]
 
+                    # pivot to wide: one row per Cell_ID + direction
                     wide = long.pivot_table(
                         index=["Cell_ID", "Pulse_Direction"],
                         columns="column_name",
@@ -1541,52 +1545,39 @@ with dcir_tab:
 
                     value_cols_sorted = sorted(value_cols, key=sort_key)
                     wide_summary = wide[["Cell_ID", "Pulse_Direction"] + value_cols_sorted]
+
+                    st.subheader(
+                        f"DCIR summary (instant + {int(round(pulse_length_s))}s, SoC as columns)"
+                    )
+                    st.dataframe(wide_summary)
                 else:
+                    st.info(
+                        "Could not build summary table – missing SoC_label or DCIR columns."
+                    )
                     wide_summary = None
 
-                # store in session_state so results survive reruns (e.g. changing radio)
-                st.session_state["dcir_results"] = dcir_results
-                st.session_state["dcir_summary"] = wide_summary
+                # ---------- 3) Excel: raw + summary on one file ----------
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                    dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
+                    if wide_summary is not None:
+                        wide_summary.to_excel(
+                            writer, index=False, sheet_name="DCIR_summary"
+                        )
 
+                output.seek(0)
+                st.download_button(
+                    label="⬇️ Download DCIR tables (Excel)",
+                    data=output,
+                    file_name="dcir_results.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
             else:
-                st.session_state["dcir_results"] = None
-                st.session_state["dcir_summary"] = None
                 st.info(
-                    "No DCIR pulses detected in the selected NDAX files. "
+                    "No DCIR pulses detected in the loaded files. "
                     "Check the pulse length or SOC design inputs."
                 )
 
-    # ---------- DISPLAY (always) from session_state, no jitter ----------
-    dcir_results = st.session_state.get("dcir_results")
-    wide_summary = st.session_state.get("dcir_summary")
-
-    if dcir_results is not None:
-        st.subheader("DCIR results (raw, one row per pulse)")
-        st.dataframe(dcir_results)
-
-        if wide_summary is not None:
-            st.subheader(
-                f"DCIR summary (instant + {int(round(pulse_length_s))}s, SoC as columns)"
-            )
-            st.dataframe(wide_summary)
-
-        import io
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
-            if wide_summary is not None:
-                wide_summary.to_excel(
-                    writer, index=False, sheet_name="DCIR_summary"
-                )
-
-        output.seek(0)
-        st.download_button(
-            label="⬇️ Download DCIR tables (Excel)",
-            data=output,
-            file_name="dcir_results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
 
    # ---------- Box plots ----------
 # with box_tab:
