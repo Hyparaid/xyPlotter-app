@@ -1586,14 +1586,7 @@ with dcir_tab:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-    else:
-        st.info(
-                    "No DCIR pulses detected in the selected files. "
-                    "Check the pulse length or SOC design inputs."
-                )
-
-
-# ---------- Box plots ----------
+   # ---------- Box plots ----------
 # with box_tab:
 #     st.subheader("Distribution box plots")
 #     num_cols = [c for c in data.columns if c != "__file" and pd.api.types.is_numeric_dtype(data[c])]
