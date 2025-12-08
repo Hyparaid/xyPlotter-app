@@ -14,6 +14,7 @@ import io
 import plotly.io as pio
 import plotly.graph_objects as go
 import math
+import matplotlib.pyplot as plt
 
 # ----------------------------
 # NDAX imports
@@ -989,8 +990,10 @@ def color_for_src(src: str) -> str:
 # ----------------------------
 # Tabs
 # ----------------------------
-xy_tab, vt_tab, vq_tab, cap_tab, ce_tab, dcir_tab, = st.tabs([
-    "XY Builder", "Voltage–Time", "Voltage–Capacity", "Capacity vs Cycle", "Capacity & CE","DCIR",])
+
+xy_tab, vt_tab, vq_tab, cap_tab, ce_tab, dcir_tab,box_tab, = st.tabs([
+    "XY Builder", "Voltage–Time", "Voltage–Capacity", "Capacity vs Cycle", "Capacity & CE","DCIR","ICE Boxplot",])
+
 #--------------------------------------
 # ---------- XY Builder ---------------
 # -------------------------------------
@@ -1591,39 +1594,235 @@ with dcir_tab:
                     "No DCIR pulses detected in the loaded files. "
                     "Check the pulse length or SOC design inputs."
                 )
+# ---------- ICE Boxplot ----------
+with box_tab:
+    st.subheader("First-cycle ICE / capacity boxplot")
 
-   # ---------- Box plots ----------
-# with box_tab:
-#     st.subheader("Distribution box plots")
-#     num_cols = [c for c in data.columns if c != "__file" and pd.api.types.is_numeric_dtype(data[c])]
-#     if not num_cols:
-#         st.info("Need at least one numeric column.")
-#     else:
-#         y_box = st.selectbox(
-#             "Numeric column for Y", num_cols,
-#             index=(num_cols.index("Spec. Cap.(mAh/g)") if "Spec. Cap.(mAh/g)" in num_cols else 0)
-#         )
+    if "Cycle Index" not in data.columns:
+        st.info("No 'Cycle Index' column found — cannot compute ICE.")
+    else:
+        # --- Build per-family capacity + ICE data ---
+        grouped = {}
 
-#         # choose x/color field from global mode
-#         if color_mode_global == "Per file":
-#             group_field = "__file"
-#             cmap = color_map_file
-#         else:
-#             # ensure __family exists (done earlier)
-#             group_field = "__family"
-#             cmap = color_map_fam
+        # Use currently selected files only
+        for src in sorted(data["__file"].astype(str).unique()):
+            df_src = data[data["__file"] == src].copy()
+            if df_src.empty:
+                continue
 
-#         dfb = data.dropna(subset=[y_box]).copy()
-#         fig_box = px.box(
-#             dfb, x=group_field, y=y_box, color=group_field,
-#             points="all", color_discrete_map=cmap
-#         )
-#         fig_box.update_layout(template="plotly_white",
-#                               xaxis_title=("File" if group_field == "__file" else "Filename family"))
-#         if show_grid:
-#             fig_box.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-#             fig_box.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-#         st.plotly_chart(fig_box, use_container_width=True)
+            # Group key: filename family (same logic as elsewhere in the app)
+            fam = df_src["__family"].iloc[0] if "__family" in df_src.columns else src
+
+            # Pick a usable cycle: prefer cycle 1, else the first with non-zero discharge
+            cyc_series = pd.to_numeric(df_src["Cycle Index"], errors="coerce")
+            cycles = sorted(cyc_series.dropna().unique().tolist())
+            if not cycles:
+                continue
+
+            cycle_to_use = None
+            for c in cycles:
+                cand = df_src[cyc_series == c].copy()
+                # require at least one positive discharge value
+                if "Discharge_Capacity(mAh)" in cand.columns:
+                    dvals = pd.to_numeric(cand["Discharge_Capacity(mAh)"], errors="coerce")
+                    if (dvals > 0).any():
+                        cycle_to_use = c
+                        break
+            if cycle_to_use is None:
+                # fallback to first cycle
+                cycle_to_use = cycles[0]
+
+            cycle_data = df_src[cyc_series == cycle_to_use].copy()
+            if cycle_data.empty:
+                continue
+
+            # --- Capacity columns ---
+            dcol = "Discharge_Capacity(mAh)" if "Discharge_Capacity(mAh)" in cycle_data.columns else None
+            ccol = "Charge_Capacity(mAh)" if "Charge_Capacity(mAh)" in cycle_data.columns else None
+
+            max_d = np.nan
+            max_c = np.nan
+            ice = np.nan
+
+            if dcol and ccol:
+                d_series = pd.to_numeric(cycle_data[dcol], errors="coerce")
+                c_series = pd.to_numeric(cycle_data[ccol], errors="coerce")
+
+                d_pos = d_series[(d_series > 0) & np.isfinite(d_series)]
+                c_pos = c_series[(c_series > 0) & np.isfinite(c_series)]
+
+                if not d_pos.empty:
+                    max_d = d_pos.max()
+                if not c_pos.empty:
+                    max_c = c_pos.max()
+
+                if max_c > 0 and np.isfinite(max_d):
+                    ice = max_d / max_c * 100.0
+
+            else:
+                # Fallback: use specific capacity if only one capacity track exists
+                sc = "Spec. Cap.(mAh/g)" if "Spec. Cap.(mAh/g)" in cycle_data.columns else None
+                if sc is not None:
+                    q_series = pd.to_numeric(cycle_data[sc], errors="coerce")
+                    q_pos = q_series[(q_series > 0) & np.isfinite(q_series)]
+                    if not q_pos.empty:
+                        max_d = q_pos.max()
+                        max_c = max_d  # symmetrical; cannot compute ICE reliably here
+
+            if not np.isfinite(max_d) or not np.isfinite(max_c):
+                continue
+
+            if fam not in grouped:
+                grouped[fam] = {
+                    "Charge": [],
+                    "Discharge": [],
+                    "ICE": [],
+                }
+
+            grouped[fam]["Charge"].append(max_c)
+            grouped[fam]["Discharge"].append(max_d)
+            if np.isfinite(ice):
+                grouped[fam]["ICE"].append(ice)
+
+        if not grouped:
+            st.info("Could not compute capacities / ICE for any of the selected files.")
+        else:
+            # --- Build tidy tables ---
+            rows = []
+            ce_rows = []
+            for fam, vals in grouped.items():
+                for v in vals["Charge"]:
+                    rows.append({"Group": fam, "Type": "Charge capacity", "Capacity(mAh)": v})
+                for v in vals["Discharge"]:
+                    rows.append({"Group": fam, "Type": "Discharge capacity", "Capacity(mAh)": v})
+
+                if vals["ICE"]:
+                    ce_rows.append({
+                        "Group": fam,
+                        "ICE_mean(%)": float(np.mean(vals["ICE"])),
+                        "ICE_std(%)": float(np.std(vals["ICE"])),
+                        "n": len(vals["ICE"]),
+                    })
+
+            plot_data = pd.DataFrame(rows)
+            ce_summary = pd.DataFrame(ce_rows)
+
+            if plot_data.empty:
+                st.info("No capacity data available for boxplot.")
+            else:
+                # --- Matplotlib boxplot ---
+                plt.style.use("default")
+                fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
+
+                groups = sorted(plot_data["Group"].unique().tolist())
+                positions = np.arange(len(groups)) * 2.0
+
+                y_max = float(plot_data["Capacity(mAh)"].max()) * 1.15
+                ax.set_ylim(0, y_max)
+
+                for i, fam in enumerate(groups):
+                    gd = plot_data[plot_data["Group"] == fam]
+                    chg = gd[gd["Type"] == "Charge capacity"]["Capacity(mAh)"]
+                    dchg = gd[gd["Type"] == "Discharge capacity"]["Capacity(mAh)"]
+
+                    # boxplots
+                    ax.boxplot(
+                        chg,
+                        positions=[positions[i] - 0.4],
+                        widths=0.6,
+                        patch_artist=True,
+                        boxprops=dict(facecolor=NV_COLORDICT["nv_blue2"], color="black"),
+                        medianprops=dict(color="black"),
+                        whiskerprops=dict(color="black"),
+                        capprops=dict(color="black"),
+                    )
+                    ax.boxplot(
+                        dchg,
+                        positions=[positions[i] + 0.4],
+                        widths=0.6,
+                        patch_artist=True,
+                        boxprops=dict(facecolor=NV_COLORDICT["nv_power_green"], color="black"),
+                        medianprops=dict(color="black"),
+                        whiskerprops=dict(color="black"),
+                        capprops=dict(color="black"),
+                    )
+
+                    # jittered points
+                    x_chg = np.random.normal(positions[i] - 0.4, 0.05, size=len(chg))
+                    x_dchg = np.random.normal(positions[i] + 0.4, 0.05, size=len(dchg))
+
+                    ax.scatter(
+                        x_chg,
+                        chg,
+                        alpha=0.6,
+                        color=NV_COLORDICT["nv_blue2"],
+                        edgecolor="black",
+                        linewidth=0.5,
+                        label="Charge capacity" if i == 0 else "",
+                    )
+                    ax.scatter(
+                        x_dchg,
+                        dchg,
+                        alpha=0.6,
+                        color=NV_COLORDICT["nv_power_green"],
+                        edgecolor="black",
+                        linewidth=0.5,
+                        label="Discharge capacity" if i == 0 else "",
+                    )
+
+                    # ICE annotation per group
+                    ice_vals = grouped[fam]["ICE"]
+                    if ice_vals:
+                        ice_mean = np.mean(ice_vals)
+                        ice_std = np.std(ice_vals)
+                        ax.text(
+                            positions[i],
+                            y_max * 0.9,
+                            f"ICE: {ice_mean:.2f} ± {ice_std:.2f}%",
+                            ha="center",
+                            va="center",
+                            fontsize=10,
+                            bbox=dict(facecolor="white", edgecolor="black", alpha=0.9),
+                        )
+
+                ax.set_xticks(positions)
+                ax.set_xticklabels(groups)
+                ax.set_ylabel("Capacity (mAh)")
+                ax.set_title("First-cycle charge / discharge capacity and ICE")
+
+                ax.grid(
+                    axis="y",
+                    linestyle="--",
+                    linewidth=0.5,
+                    color=NV_COLORDICT["nv_gray3"],
+                )
+
+                # de-duplicate legend entries
+                handles, labels = ax.get_legend_handles_labels()
+                by_label = dict(zip(labels, handles))
+                ax.legend(by_label.values(), by_label.keys(), loc="lower right")
+
+                st.pyplot(fig)
+
+                # --- ICE summary table ---
+                st.subheader("ICE summary per group")
+                if not ce_summary.empty:
+                    st.dataframe(ce_summary)
+                else:
+                    st.caption("_No ICE values could be computed (missing charge/discharge pair)._")
+
+                # --- PNG download ---
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", dpi=400, bbox_inches="tight")
+                buf.seek(0)
+                st.download_button(
+                    label="⬇️ Download boxplot as PNG (400 dpi)",
+                    data=buf,
+                    file_name="ice_boxplot.png",
+                    mime="image/png",
+                )
+
+                plt.close(fig)
 
 
 st.success("Loaded. Use the tabs above to explore your NDAX data.")
