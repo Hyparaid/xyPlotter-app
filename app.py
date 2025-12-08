@@ -1698,8 +1698,20 @@ with box_tab:
                 groups = sorted(plot_data["Group"].unique().tolist())
                 positions = np.arange(len(groups)) * 2.0
 
-                y_max = float(plot_data["Capacity"].max()) * 1.15
-                #ax.set_ylim(0, y_max)
+                y_min_auto = 0.0
+                y_max_auto = float(plot_data["Capacity"].max()) * 1.15
+
+                st.caption(f"Auto y-range: {y_min_auto:.1f} – {y_max_auto:.1f}")
+
+                use_custom_ylim = st.checkbox("Set custom y-axis limits", value=False)
+
+                if use_custom_ylim:
+                    y_min = st.number_input("Y min", value=y_min_auto, step=10.0)
+                    y_max = st.number_input("Y max", value=y_max_auto, step=10.0)
+                else:
+                    y_min, y_max = y_min_auto, y_max_auto
+
+                ax.set_ylim(y_min, y_max)
 
                 for i, fam in enumerate(groups):
                     gd = plot_data[plot_data["Group"] == fam]
