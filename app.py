@@ -1595,81 +1595,54 @@ with dcir_tab:
                     "Check the pulse length or SOC design inputs."
                 )
 # ---------- ICE Boxplot ----------
-with box_tab:
+with box_tab: 
     st.subheader("First-cycle ICE / capacity boxplot")
 
+    # Need cycles to compute CE
     if "Cycle Index" not in data.columns:
         st.info("No 'Cycle Index' column found — cannot compute ICE.")
     else:
-        # --- Build per-family capacity + ICE data ---
+        # Use same CE direction logic as the CE tab
+        # full -> treated as cathode, otherwise anode / cathode as selected
+        ce_cell_type = "cathode" if cell_type_sel == "full" else cell_type_sel
+
+        # --- Build per-family capacity + ICE data using compute_ce() ---
         grouped = {}
 
-        # Use currently selected files only
         for src in sorted(data["__file"].astype(str).unique()):
-            df_src = data[data["__file"] == src].copy()
-            if df_src.empty:
+            sub = data[data["__file"] == src].copy()
+            if sub.empty:
                 continue
 
-            # Group key: filename family (same logic as elsewhere in the app)
-            fam = df_src["__family"].iloc[0] if "__family" in df_src.columns else src
+            # Group key: always from filename family (so replicates are pooled)
+            fam = family_from_filename(src)
 
-            # Pick a usable cycle: prefer cycle 1, else the first with non-zero discharge
-            cyc_series = pd.to_numeric(df_src["Cycle Index"], errors="coerce")
-            cycles = sorted(cyc_series.dropna().unique().tolist())
-            if not cycles:
+            # Cycle-wise CE / capacities (reuses your central CE logic)
+            ce_df = compute_ce(sub, cell_type=ce_cell_type)
+            if ce_df.empty:
                 continue
 
-            cycle_to_use = None
-            for c in cycles:
-                cand = df_src[cyc_series == c].copy()
-                # require at least one positive discharge value
-                if "Discharge_Capacity(mAh)" in cand.columns:
-                    dvals = pd.to_numeric(cand["Discharge_Capacity(mAh)"], errors="coerce")
-                    if (dvals > 0).any():
-                        cycle_to_use = c
-                        break
-            if cycle_to_use is None:
-                # fallback to first cycle
-                cycle_to_use = cycles[0]
+            # Pick the *first* cycle with valid capacities (and CE, if possible)
+            ce_df = ce_df.sort_values("cycle")
+            ice_row = None
+            for _, r in ce_df.iterrows():
+                q_chg = r.get("q_chg", np.nan)
+                q_dch = r.get("q_dch", np.nan)
+                if (
+                    pd.notna(q_chg) and pd.notna(q_dch)
+                    and q_chg > 0 and q_dch > 0
+                ):
+                    ice_row = r
+                    break
 
-            cycle_data = df_src[cyc_series == cycle_to_use].copy()
-            if cycle_data.empty:
+            if ice_row is None:
                 continue
 
-            # --- Capacity columns ---
-            dcol = "Discharge_Capacity(mAh)" if "Discharge_Capacity(mAh)" in cycle_data.columns else None
-            ccol = "Charge_Capacity(mAh)" if "Charge_Capacity(mAh)" in cycle_data.columns else None
+            max_c = float(ice_row["q_chg"])
+            max_d = float(ice_row["q_dch"])
+            ice = float(ice_row["ce"]) if not pd.isna(ice_row["ce"]) else np.nan
 
-            max_d = np.nan
-            max_c = np.nan
-            ice = np.nan
-
-            if dcol and ccol:
-                d_series = pd.to_numeric(cycle_data[dcol], errors="coerce")
-                c_series = pd.to_numeric(cycle_data[ccol], errors="coerce")
-
-                d_pos = d_series[(d_series > 0) & np.isfinite(d_series)]
-                c_pos = c_series[(c_series > 0) & np.isfinite(c_series)]
-
-                if not d_pos.empty:
-                    max_d = d_pos.max()
-                if not c_pos.empty:
-                    max_c = c_pos.max()
-
-                if max_c > 0 and np.isfinite(max_d):
-                    ice = max_d / max_c * 100.0
-
-            else:
-                # Fallback: use specific capacity if only one capacity track exists
-                sc = "Spec. Cap.(mAh/g)" if "Spec. Cap.(mAh/g)" in cycle_data.columns else None
-                if sc is not None:
-                    q_series = pd.to_numeric(cycle_data[sc], errors="coerce")
-                    q_pos = q_series[(q_series > 0) & np.isfinite(q_series)]
-                    if not q_pos.empty:
-                        max_d = q_pos.max()
-                        max_c = max_d  # symmetrical; cannot compute ICE reliably here
-
-            if not np.isfinite(max_d) or not np.isfinite(max_c):
+            if not np.isfinite(max_c) or not np.isfinite(max_d):
                 continue
 
             if fam not in grouped:
@@ -1692,9 +1665,9 @@ with box_tab:
             ce_rows = []
             for fam, vals in grouped.items():
                 for v in vals["Charge"]:
-                    rows.append({"Group": fam, "Type": "Charge capacity", "Capacity(mAh)": v})
+                    rows.append({"Group": fam, "Type": "Charge capacity", "Capacity": v})
                 for v in vals["Discharge"]:
-                    rows.append({"Group": fam, "Type": "Discharge capacity", "Capacity(mAh)": v})
+                    rows.append({"Group": fam, "Type": "Discharge capacity", "Capacity": v})
 
                 if vals["ICE"]:
                     ce_rows.append({
@@ -1710,6 +1683,14 @@ with box_tab:
             if plot_data.empty:
                 st.info("No capacity data available for boxplot.")
             else:
+                # Decide label: spec. cap vs total cap (same idea as CE tab)
+                has_spec_cap = any(
+                    ("Spec. Cap.(mAh/g)" in data.columns) or
+                    ("DChg. Spec. Cap.(mAh/g)" in data.columns) or
+                    ("Chg. Spec. Cap.(mAh/g)" in data.columns)
+                )
+                y_label = "Specific capacity (mAh/g)" if has_spec_cap else "Capacity"
+
                 # --- Matplotlib boxplot ---
                 plt.style.use("default")
                 fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
@@ -1717,13 +1698,13 @@ with box_tab:
                 groups = sorted(plot_data["Group"].unique().tolist())
                 positions = np.arange(len(groups)) * 2.0
 
-                y_max = float(plot_data["Capacity(mAh)"].max()) * 1.15
+                y_max = float(plot_data["Capacity"].max()) * 1.15
                 ax.set_ylim(0, y_max)
 
                 for i, fam in enumerate(groups):
                     gd = plot_data[plot_data["Group"] == fam]
-                    chg = gd[gd["Type"] == "Charge capacity"]["Capacity(mAh)"]
-                    dchg = gd[gd["Type"] == "Discharge capacity"]["Capacity(mAh)"]
+                    chg = gd[gd["Type"] == "Charge capacity"]["Capacity"]
+                    dchg = gd[gd["Type"] == "Discharge capacity"]["Capacity"]
 
                     # boxplots
                     ax.boxplot(
@@ -1787,8 +1768,11 @@ with box_tab:
 
                 ax.set_xticks(positions)
                 ax.set_xticklabels(groups)
-                ax.set_ylabel("Capacity (mAh)")
-                ax.set_title("First-cycle charge / discharge capacity and ICE")
+                ax.set_ylabel(y_label)
+                ax.set_title(
+                    f"First-cycle charge / discharge capacity and ICE "
+                    f"({ce_cell_type} CE)"
+                )
 
                 ax.grid(
                     axis="y",
@@ -1824,5 +1808,9 @@ with box_tab:
 
                 plt.close(fig)
 
-
+        st.caption(
+            f"CE direction uses the same **Cell type** option as the CE tab "
+            f"(current: **{ce_cell_type}**)."
+        )
+        
 st.success("Loaded. Use the tabs above to explore your NDAX data.")
