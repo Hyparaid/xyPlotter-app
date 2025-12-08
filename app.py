@@ -1699,7 +1699,7 @@ with box_tab:
                 positions = np.arange(len(groups)) * 2.0
 
                 y_max = float(plot_data["Capacity"].max()) * 1.15
-                ax.set_ylim(0, y_max)
+                #ax.set_ylim(0, y_max)
 
                 for i, fam in enumerate(groups):
                     gd = plot_data[plot_data["Group"] == fam]
