@@ -1684,7 +1684,7 @@ with box_tab:
                 st.info("No capacity data available for boxplot.")
             else:
                 # Decide label: spec. cap vs total cap (same idea as CE tab)
-                has_spec_cap = any(
+                has_spec_cap = (
                     ("Spec. Cap.(mAh/g)" in data.columns) or
                     ("DChg. Spec. Cap.(mAh/g)" in data.columns) or
                     ("Chg. Spec. Cap.(mAh/g)" in data.columns)
@@ -1812,5 +1812,5 @@ with box_tab:
             f"CE direction uses the same **Cell type** option as the CE tab "
             f"(current: **{ce_cell_type}**)."
         )
-        
+
 st.success("Loaded. Use the tabs above to explore your NDAX data.")
