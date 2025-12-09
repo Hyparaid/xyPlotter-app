@@ -1693,7 +1693,7 @@ with box_tab:
 
                 # --- Matplotlib boxplot ---
                 plt.style.use("default")
-                fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
+                fig, ax = plt.subplots(figsize=(6, 4), dpi=150)
 
                 groups = sorted(plot_data["Group"].unique().tolist())
                 positions = np.arange(len(groups)) * 2.0
