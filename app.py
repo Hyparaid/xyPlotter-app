@@ -1798,7 +1798,9 @@ with box_tab:
                 by_label = dict(zip(labels, handles))
                 ax.legend(by_label.values(), by_label.keys(), loc="lower right")
 
-                st.pyplot(fig)
+                col_left, col_plot, col_right = st.columns([1, 2, 1])
+                with col_plot:
+                    st.pyplot(fig, use_container_width=False)
 
                 # --- ICE summary table ---
                 st.subheader("ICE summary per group")
