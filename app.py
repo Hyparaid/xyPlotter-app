@@ -1693,7 +1693,7 @@ with box_tab:
 
                 # --- Matplotlib boxplot ---
                 plt.style.use("default")
-                fig, ax = plt.subplots(figsize=(5, 3), dpi=150)
+                fig, ax = plt.subplots(figsize=(6, 4), dpi=150)
 
                 groups = sorted(plot_data["Group"].unique().tolist())
                 positions = np.arange(len(groups)) * 2.0
@@ -1774,7 +1774,7 @@ with box_tab:
                             f"ICE: {ice_mean:.2f} ± {ice_std:.2f}%",
                             ha="center",
                             va="center",
-                            fontsize=5,
+                            fontsize=8,
                             bbox=dict(facecolor="white", edgecolor="black", alpha=0.9),
                         )
 
