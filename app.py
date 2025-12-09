@@ -1693,7 +1693,7 @@ with box_tab:
 
                 # --- Matplotlib boxplot ---
                 plt.style.use("default")
-                fig, ax = plt.subplots(figsize=(6, 4), dpi=150)
+                fig, ax = plt.subplots(figsize=(5, 3), dpi=150)
 
                 groups = sorted(plot_data["Group"].unique().tolist())
                 positions = np.arange(len(groups)) * 2.0
@@ -1798,9 +1798,7 @@ with box_tab:
                 by_label = dict(zip(labels, handles))
                 ax.legend(by_label.values(), by_label.keys(), loc="lower right")
 
-                col_left, col_plot, col_right = st.columns([1, 2, 2])
-                with col_plot:
-                    st.pyplot(fig, use_container_width=False)
+                st.pyplot(fig, use_container_width=False)
 
                 # --- ICE summary table ---
                 st.subheader("ICE summary per group")
