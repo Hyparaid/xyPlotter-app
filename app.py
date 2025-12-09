@@ -1774,7 +1774,7 @@ with box_tab:
                             f"ICE: {ice_mean:.2f} ± {ice_std:.2f}%",
                             ha="center",
                             va="center",
-                            fontsize=10,
+                            fontsize=5,
                             bbox=dict(facecolor="white", edgecolor="black", alpha=0.9),
                         )
 
