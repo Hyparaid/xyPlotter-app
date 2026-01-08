@@ -673,10 +673,6 @@ st.caption("Built by the Preli team")
 # ----------------------------
 # Sidebar: upload + parse (GATED)
 # ----------------------------
-st.sidebar.header("Upload NDAX files only")
-
-
-
 with st.sidebar.form("upload_form", clear_on_submit=False):
     uploaded_files = st.file_uploader(
         "Drop Neware .ndax files (multiple allowed)",
@@ -693,7 +689,7 @@ with top_r:
             for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files"]:
                 st.session_state.pop(k, None)
             st.rerun()
-            
+
 if not uploaded_files and "parsed_by_file" not in st.session_state:
     st.info("Upload one or more NDAX files and press 🚀 launch.")
     st.stop()
