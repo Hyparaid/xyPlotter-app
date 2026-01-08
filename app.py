@@ -823,7 +823,7 @@ PAGES = [
 view = st.segmented_control(
     "View selector",
     options=PAGES,
-    default=PAGES[2],
+    default=PAGES[3],
     key="view_selector_main",
     label_visibility="collapsed",
 )
