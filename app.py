@@ -1069,9 +1069,23 @@ if view == "Voltage–Capacity":
     sel_cycle = None
     rng = None
     if cycles_available:
-        sel_cycle = st.selectbox("Cycle", ["All"] + cycles_available, 0)
-        cmin, cmax = int(min(cycles_available)), int(max(cycles_available))
-        rng = st.slider("Cycle range (optional)", cmin, cmax, (cmin, cmax), 1)
+        # default to cycle 1 if present, else the smallest cycle
+        default_cycle = 1 if 1 in cycles_available else cycles_available[0]
+        default_index = 1 + cycles_available.index(default_cycle)  # +1 because "All" is index 0
+
+        sel_cycle = st.selectbox(
+            "Cycle",
+            ["All"] + cycles_available,
+            index=default_index,
+            key="vq_cycle_select",
+        )
+
+        # only show the range slider when plotting "All" (keeps it fast + clean)
+        if sel_cycle == "All":
+            cmin, cmax = int(min(cycles_available)), int(max(cycles_available))
+            rng = st.slider("Cycle range (optional)", cmin, cmax, (cmin, cmax), 1, key="vq_cycle_range")
+        else:
+            rng = None
 
     fig_vq = go.Figure()
     for src in selected_files:
