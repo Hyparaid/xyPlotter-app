@@ -675,12 +675,7 @@ st.caption("Built by the Preli team")
 # ----------------------------
 st.sidebar.header("Upload NDAX files only")
 
-# Provide an easy way to clear state
-if st.sidebar.button("🧹 Clear cache data"):
-    for k in ["parsed_by_file", "file_checks", "uploaded_names_cache"]:
-        if k in st.session_state:
-            del st.session_state[k]
-    st.rerun()
+
 
 with st.sidebar.form("upload_form", clear_on_submit=False):
     uploaded_files = st.file_uploader(
@@ -690,6 +685,15 @@ with st.sidebar.form("upload_form", clear_on_submit=False):
     )
     parse_now = st.form_submit_button("🚀 launch files")
 
+# Provide an easy way to clear state
+top_l, top_r = st.columns([6, 1])
+with top_r:
+    if "parsed_by_file" in st.session_state:
+        if st.button("🧹 Reset", key="clear_parsed_main"):
+            for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+            
 if not uploaded_files and "parsed_by_file" not in st.session_state:
     st.info("Upload one or more NDAX files and press 🚀 launch.")
     st.stop()
