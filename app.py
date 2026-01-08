@@ -1,20 +1,32 @@
+
+# app_optimized.py
+# ------------------------------------------------------------
+# Battery Cell Data — Visualizer (Optimized)
+# Key improvements vs. original:
+# - Upload + parse gated behind a form submit button (prevents N*(N+1)/2 re-parses)
+# - Stable caching keyed on (filename + bytes md5) instead of Streamlit UploadedFile object
+# - Temp files are deleted after parse (no disk creep)
+# - Avoids giant "raw" concatenations unless needed; plots iterate per-file
+# - Avoids executing all tabs on every rerun by using a sidebar "View" selector (lazy execution)
+# - Fixes selected_sources overwrite bug
+# ------------------------------------------------------------
+
 import re
+import io
+import os
+import math
+import hashlib
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
-from PIL import Image
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 import pandas as pd
-import plotly.express as px
+import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import streamlit as st
-import warnings
-import io
-import plotly.io as pio
-import plotly.graph_objects as go
-import math
 import matplotlib.pyplot as plt
+import warnings
 
 # ----------------------------
 # NDAX imports
@@ -25,21 +37,19 @@ except Exception:
     nda = None
 
 try:
-    # your helper in the same folder as app.py
     from ndax_min_builder import build_ndax_df
 except Exception:
     build_ndax_df = None
 
+
 # ----------------------------
 # App config
 # ----------------------------
-
-# Export via the modebar camera button
 CAMERA_CFG = {
     "toImageButtonOptions": {
-        "format": "png",      # or "svg"
+        "format": "png",
         "filename": "plot",
-        "scale": 4            # 2–4 is great for PPT
+        "scale": 4
     }
 }
 
@@ -50,74 +60,55 @@ st.set_page_config(
 )
 
 HERE = Path(__file__).parent
-LOGO_PATH = HERE / "logo.png"   # exact filename
-# Center the banner
-c1, c2, c3 = st.columns([1, 1, 1])
-with c2:
-    if LOGO_PATH.exists():
-        st.image(str(LOGO_PATH))
-    else:
-        st.caption(f"Logo missing: {LOGO_PATH.name}")
+LOGO_PATH = HERE / "logo.png"
 
-st.title("🔋BATTERY CELL DATA —  VISUALIZER 📈")
-st.caption("     Built by the Preli team    ")
-
-# =============================
-# Helpers
-# =============================
+# ----------------------------
+# Styling / colors
+# ----------------------------
 NV_COLORDICT = {
-    # Core
     "white": "#ffffff",
     "black": "#000000",
 
-    # Greens (light → dark)
     "nv_green1": "#9ef3c0",
-    "nv_green2": "#81f1c4",   
+    "nv_green2": "#81f1c4",
     "nv_green3": "#09f392",
-    "nv_green4": "#03a567",   
+    "nv_green4": "#03a567",
     "nv_green5": "#028133",
-    "nv_green6": "#009632",   
-    "nv_green7": "#1e644b",   
-    "nv_green8": "#174335",   
+    "nv_green6": "#009632",
+    "nv_green7": "#1e644b",
+    "nv_green8": "#174335",
     "nv_green9": "#0e2922",
 
-    # Blues/Teals (light → dark)
     "nv_blue0": "#bcf0fc",
-    "nv_blue1": "#79c4c2",    
-    "nv_blue2": "#2ea2a8",    
-    "nv_blue3": "#058e91",    
-    "nv_blue4": "#006663",    
-    "nv_blue5": "#0f5280",    
+    "nv_blue1": "#79c4c2",
+    "nv_blue2": "#2ea2a8",
+    "nv_blue3": "#058e91",
+    "nv_blue4": "#006663",
+    "nv_blue5": "#0f5280",
     "nv_blue6": "#2891CE",
     "nv_blue7": "#094246",
-    "nv_blue8": "#034e7b",    
+    "nv_blue8": "#034e7b",
     "nv_blue9": "#013b5a",
 
-    # Greys (light → dark)
-    "nv_gray1": "#f3f3f3",    
-    "nv_gray2": "#e2e2e2",    
-    "nv_gray3": "#c0c0c0",    
-    "nv_gray4": "#9b9b9b",    
-    "nv_gray5": "#6e6e6d",    
+    "nv_gray1": "#f3f3f3",
+    "nv_gray2": "#e2e2e2",
+    "nv_gray3": "#c0c0c0",
+    "nv_gray4": "#9b9b9b",
+    "nv_gray5": "#6e6e6d",
     "nv_gray6": "#b3b3b3",
     "nv_gray7": "#8c8c8c",
     "nv_gray8": "#666666",
     "nv_gray9": "#4d4d4d",
     "nv_gray10": "#333333",
 
-    # Accents
-    "nv_power_green": "#44a27a",  # existing
-    "nv_silver": "#8A8D8F",       # existing
+    "nv_power_green": "#44a27a",
+    "nv_silver": "#8A8D8F",
     "nv_red": "#d84437",
     "nv_orange": "#f78618",
     "nv_amber": "#f7a600",
 }
 
-# ----------------------------
-# Palettes (8–10 colors each)
-# ----------------------------
 PALETTES = {
-    # Long, varied palette for multi-series plots (20+)
     "Preli long": [
         NV_COLORDICT["nv_power_green"], NV_COLORDICT["nv_blue5"], NV_COLORDICT["nv_blue1"],
         "#e7298a", "#0383a3", "#013824", "#c7e9b4", "#7fcdbb",
@@ -126,51 +117,40 @@ PALETTES = {
         NV_COLORDICT["nv_green5"], NV_COLORDICT["nv_blue9"], NV_COLORDICT["nv_gray8"],
         NV_COLORDICT["nv_amber"], NV_COLORDICT["nv_orange"]
     ],
-
-    # 10 blues/teals (light → dark)
     "Preli blues": [
         NV_COLORDICT["nv_blue0"], NV_COLORDICT["nv_blue1"], NV_COLORDICT["nv_blue2"],
         NV_COLORDICT["nv_blue3"], NV_COLORDICT["nv_blue4"], NV_COLORDICT["nv_blue5"],
         NV_COLORDICT["nv_blue6"], NV_COLORDICT["nv_blue7"], NV_COLORDICT["nv_blue8"],
         NV_COLORDICT["nv_blue9"],
     ],
-
-    # 9 greens (light → dark)
     "Preli greens": [
         NV_COLORDICT["nv_green1"], NV_COLORDICT["nv_green2"], NV_COLORDICT["nv_green3"],
         NV_COLORDICT["nv_green4"], NV_COLORDICT["nv_green5"], NV_COLORDICT["nv_green6"],
         NV_COLORDICT["nv_green7"], NV_COLORDICT["nv_green8"], NV_COLORDICT["nv_green9"],
     ],
-
-    # 10 greys (light → dark)
     "Preli greys": [
         NV_COLORDICT["nv_gray1"], NV_COLORDICT["nv_gray2"], NV_COLORDICT["nv_gray6"],
         NV_COLORDICT["nv_gray3"], NV_COLORDICT["nv_gray7"], NV_COLORDICT["nv_gray4"],
         NV_COLORDICT["nv_gray8"], NV_COLORDICT["nv_gray5"], NV_COLORDICT["nv_gray9"],
         NV_COLORDICT["nv_gray10"],
     ],
-
-    # Warm accents
-     "Preli Warm": [
-        # yellows (light → deep)
+    "Preli Warm": [
         "#FFE8A3", "#FFD166", "#F7B733",
-        # oranges (soft → vivid)
         "#F49E4C", "#F07C28", "#F25C05",
-        # reds (warm → deep)
         "#E63B2E", "#CC2F27", "#A72222", "#7F1D1D"
-    ]
+    ],
 }
 
+warnings.filterwarnings(
+    "ignore",
+    message="The behavior of DataFrame concatenation with empty or all-NA entries is deprecated",
+    category=FutureWarning,
+)
+
 # ----------------------------
-# Figure styling + PPT export helpers
+# Helpers
 # ----------------------------
 def style_for_ppt(fig):
-    """
-    Apply a consistent, PPT-friendly style:
-    - Larger font
-    - Horizontal legend with border
-    - Matplotlib-like axis borders & ticks
-    """
     fig.update_layout(
         font=dict(family="Arial", size=16, color="black"),
         margin=dict(l=80, r=40, t=60, b=80),
@@ -185,56 +165,26 @@ def style_for_ppt(fig):
             bgcolor="rgba(255,255,255,0.9)",
         ),
     )
-    # Axis borders + ticks (we *don’t* touch showgrid here)
     fig.update_xaxes(
-        showline=True,
-        linecolor="black",
-        linewidth=1,
-        mirror=True,
-        ticks="outside",
-        tickwidth=1,
-        ticklen=6,
+        showline=True, linecolor="black", linewidth=1, mirror=True,
+        ticks="outside", tickwidth=1, ticklen=6,
         title_font=dict(family="Arial", size=14, color="black"),
         tickfont=dict(family="Arial", size=14, color="black"),
-        
     )
     fig.update_yaxes(
-        showline=True,
-        linecolor="black",
-        linewidth=1,
-        mirror=True,
-        ticks="outside",
-        tickwidth=1,
-        ticklen=6,
+        showline=True, linecolor="black", linewidth=1, mirror=True,
+        ticks="outside", tickwidth=1, ticklen=6,
         title_font=dict(family="Arial", size=14, color="black"),
         tickfont=dict(family="Arial", size=14, color="black"),
     )
 
-
 def add_ppt_download(fig, filename_base: str):
-    """
-    High-res PNG download for PowerPoint.
-    Requires `kaleido` in your env: pip install -U kaleido
-    """
-    import io
     buf = io.BytesIO()
-
     try:
-        fig.write_image(
-            buf,
-            format="png",
-            width=1600,   # pixels
-            height=900,
-            scale=2,      # supersampling → crisp text/lines
-        )
+        fig.write_image(buf, format="png", width=1600, height=900, scale=2)
     except Exception:
-        st.info(
-            "Static image export not available. "
-            "Install `kaleido` (pip install -U kaleido) "
-            "to enable high-quality PNG downloads."
-        )
+        st.info("Static image export not available. Install `kaleido` to enable PNG downloads.")
         return
-
     buf.seek(0)
     st.download_button(
         label="⬇️ Download PNG for PPT",
@@ -244,14 +194,31 @@ def add_ppt_download(fig, filename_base: str):
     )
 
 def pretty_src(src: str) -> str:
-    """Shorten file name for legend labels."""
-    return Path(src).stem  # "preli_2.ndax" -> "preli_2"
+    return Path(src).stem
 
-# ----------------------------
-# Helpers
-# ----------------------------
+def family_from_filename(name: str) -> str:
+    stem = Path(str(name)).stem.lower()
+    for sep in ["_", "-", " "]:
+        if sep in stem:
+            stem = stem.split(sep)[0]
+            break
+    return re.sub(r"\d+$", "", stem) or stem
+
+def _concat_nonempty(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    if not frames:
+        return pd.DataFrame()
+    keep = []
+    cols = pd.Index([])
+    for f in frames:
+        if isinstance(f, pd.DataFrame):
+            cols = cols.union(f.columns)
+            if not f.empty and (not f.isna().all().all()):
+                keep.append(f)
+    if not keep:
+        return pd.DataFrame(columns=cols)
+    return pd.concat(keep, ignore_index=True, copy=False)
+
 def normalize_neware_headers(df: pd.DataFrame) -> pd.DataFrame:
-    """Map common NDAX/Neware variants to canonical headers used downstream."""
     d = df.copy()
     lower_map = {c.lower(): c for c in d.columns}
 
@@ -265,52 +232,21 @@ def normalize_neware_headers(df: pd.DataFrame) -> pd.DataFrame:
                 lower_map[target.lower()] = target
                 break
 
-    # time / timestamp variants
     ensure("Total Time", "totaltime", "total time")
-    ensure("Time", "time(s)", "time")  # often numeric seconds (resets per step)
-    # voltage/current
+    ensure("Time", "time(s)", "time")
     ensure("Voltage(V)", "voltage (v)", "voltage")
     ensure("Current(mA)", "current (ma)", "current")
-    # capacity (total + specific + per-step)
+
     ensure("Spec. Cap.(mAh/g)", "specific capacity (mAh/g)", "specific capacity (mah/g)", "spec cap (mah/g)")
     ensure("Capacity(mAh)", "capacity (mah)", "capacity")
     ensure("Chg. Spec. Cap.(mAh/g)", "chg. specific capacity (mAh/g)", "chg. spec. cap.(mAh/g)")
     ensure("DChg. Spec. Cap.(mAh/g)", "dchg. specific capacity (mAh/g)", "dchg. spec. cap.(mAh/g)")
     ensure("Chg. Cap.(mAh)", "chg. capacity (mah)")
     ensure("DChg. Cap.(mAh)", "dchg. capacity (mah)")
-    # cycle & step
+
     ensure("Cycle Index", "cycle", "cycle number", "cycle_index")
     ensure("Step Type", "status", "state", "mode", "step")
     return d
-
-warnings.filterwarnings(
-    "ignore",
-    message="The behavior of DataFrame concatenation with empty or all-NA entries is deprecated",
-    category=FutureWarning,
-)
-
-
-
-def _concat_nonempty(frames):
-    """Concat after dropping empty or all-NaN DataFrames."""
-    if not frames:
-        return pd.DataFrame()
-    keep = []
-    for f in frames:
-        if f is None:
-            continue
-        if isinstance(f, pd.DataFrame) and (not f.empty):
-            # drop DataFrames that are all-NaN (no real values anywhere)
-            if not f.isna().all().all():
-                keep.append(f)
-    if not keep:
-        # return an empty frame with union of columns to keep downstream code happy
-        cols = pd.Index([])
-        for f in frames:
-            if isinstance(f, pd.DataFrame):
-                cols = cols.union(f.columns)
-        return pd.DataFrame(columns=cols)
-    return pd.concat(keep, ignore_index=True, copy=False)
 
 def infer_rest_step(
     df: pd.DataFrame,
@@ -319,7 +255,6 @@ def infer_rest_step(
     abs_threshold: float = 0.5,
     win: int = 5,
 ) -> pd.DataFrame:
-    """If Rest isn't labeled, infer it where |Current(mA)| ~ 0 using rolling median."""
     d = df.copy()
     if current_col not in d.columns:
         return d
@@ -334,10 +269,10 @@ def infer_rest_step(
         d[step_col] = np.where(is_rest, "Rest", "")
     return d
 
-# ---- Global time builder (prefers absolute timestamp; else stitches step-local Time) ----
 TIMESTAMP_CANDIDATES = [
     "Timestamp", "TimeStamp", "Record Time", "RecordTime", "Date Time", "DateTime",
-    "datetime", "Measured Time", "MeasuredTime", "Test Time", "TestTime", "Start Time", "StartTime"
+    "datetime", "Measured Time", "MeasuredTime", "Test Time", "TestTime", "Start Time", "StartTime",
+    "System Time", "Local Time"
 ]
 
 def pick_timestamp_column(df: pd.DataFrame) -> Optional[str]:
@@ -348,30 +283,29 @@ def pick_timestamp_column(df: pd.DataFrame) -> Optional[str]:
     for c in TIMESTAMP_CANDIDATES:
         if c.lower() in lower:
             return lower[c.lower()]
+    # heuristic: any column with many parseable datetimes
+    for c in df.columns:
+        s = pd.to_datetime(df[c], errors="coerce")
+        if s.notna().mean() > 0.8:
+            return c
     return None
 
 def build_global_time_seconds(
     df: pd.DataFrame,
-    time_col: Optional[str],              # "Time" (resets) or "Total Time"
+    time_col: Optional[str],
     cycle_col: str = "Cycle Index",
     step_col: str  = "Step Type",
 ) -> pd.Series:
-    """
-    Return a monotonic, t0-aligned time vector in seconds.
-    Priority:
-      1) Absolute timestamp column (parsed to datetime)
-      2) Total Time (HH:MM:SS-like)
-      3) Stitch step-local 'Time' that resets (accumulate per (cycle, step) group)
-    """
     d = df
 
     # 1) Absolute timestamp
     ts_col = pick_timestamp_column(d)
     if ts_col:
         t = pd.to_datetime(d[ts_col], errors="coerce")
-        return (t - t.iloc[0]).dt.total_seconds()
+        if t.notna().any():
+            return (t - t.iloc[0]).dt.total_seconds()
 
-    # 2) Total Time
+    # 2) Total Time (HH:MM:SS-like)
     if time_col and time_col in d.columns and time_col.lower() == "total time":
         td = pd.to_timedelta(d[time_col].astype(str), errors="coerce")
         return (td - td.iloc[0]).dt.total_seconds()
@@ -381,7 +315,6 @@ def build_global_time_seconds(
     if raw is None:
         return pd.Series(np.zeros(len(d)), index=d.index, dtype="float64")
 
-    # choose grouping key
     if cycle_col in d.columns and step_col in d.columns:
         gkey = d[cycle_col].astype("Int64").astype(str) + "|" + d[step_col].astype(str)
     elif cycle_col in d.columns:
@@ -410,25 +343,7 @@ def build_global_time_seconds(
     stitched = within + gkey.map(offsets).astype(float)
     return stitched - stitched.iloc[0]
 
-def pick_timestamp_column(df: pd.DataFrame) -> Optional[str]:
-    """Return the first column that looks like an absolute timestamp."""
-    candidates = [
-        "Timestamp", "DateTime", "Datetime", "DATE TIME", "Start Time",
-        "Record Time", "RecordTime", "System Time", "Local Time"
-    ]
-    cols_lc = {c.lower(): c for c in df.columns}
-    for name in candidates:
-        if name.lower() in cols_lc:
-            return cols_lc[name.lower()]
-    # heuristic: any column with many parseable datetimes
-    for c in df.columns:
-        s = pd.to_datetime(df[c], errors="coerce")
-        if s.notna().mean() > 0.8:
-            return c
-    return None
-
 def insert_line_breaks_vq(df: pd.DataFrame, cap_col: str, v_col: str) -> pd.DataFrame:
-    """Insert NaNs after capacity resets to force V–Q breaks."""
     if df.empty or cap_col not in df.columns or v_col not in df.columns:
         return df
     d = df.reset_index(drop=True).copy()
@@ -445,37 +360,7 @@ def insert_line_breaks_vq(df: pd.DataFrame, cap_col: str, v_col: str) -> pd.Data
     pieces.append(d.iloc[last:])
     return _concat_nonempty(pieces)
 
-def insert_line_breaks_vt(df: pd.DataFrame, t_col: str, v_col: str) -> pd.DataFrame:
-    """Insert NaNs at cycle changes and at Rest transitions."""
-    if df.empty or t_col not in df.columns or v_col not in df.columns:
-        return df
-    d = df.reset_index(drop=True).copy()
-    breaks = set()
-    n = len(d)
-    if "Cycle Index" in d.columns:
-        cyc = d["Cycle Index"].values
-        for i in range(n - 1):
-            if pd.notna(cyc[i]) and pd.notna(cyc[i + 1]) and cyc[i + 1] != cyc[i]:
-                breaks.add(i)
-    if "Step Type" in d.columns:
-        stype = d["Step Type"].astype(str)
-        for i in range(n - 1):
-            a, b = stype.iloc[i], stype.iloc[i + 1]
-            if (a == "Rest" and b != "Rest") or (a != "Rest" and b == "Rest"):
-                breaks.add(i)
-    if not breaks:
-        return d
-    pieces, last = [], 0
-    for i in sorted(breaks):
-        pieces.append(d.iloc[last:i + 1])
-        nan_row = {c: (np.nan if c in [t_col, v_col] else d.iloc[i].get(c)) for c in d.columns}
-        pieces.append(pd.DataFrame([nan_row]))
-        last = i + 1
-    pieces.append(d.iloc[last:])
-    return _concat_nonempty(pieces)
-
 def compute_ce(df: pd.DataFrame, cell_type: str = "cathode") -> pd.DataFrame:
-    """Cycle-wise CE; prefers specific-cap columns, otherwise totals."""
     if "Cycle Index" not in df.columns:
         return pd.DataFrame()
     sc_chg = "Chg. Spec. Cap.(mAh/g)" if "Chg. Spec. Cap.(mAh/g)" in df.columns else None
@@ -505,6 +390,7 @@ def compute_ce(df: pd.DataFrame, cell_type: str = "cathode") -> pd.DataFrame:
         elif cap_mAh:
             q_chg = pd.to_numeric(sub.get(cap_mAh), errors="coerce").max()
             q_dch = q_chg
+
         if pd.isna(q_chg) or pd.isna(q_dch) or q_dch == 0 or q_chg == 0:
             ce = np.nan
         else:
@@ -527,119 +413,28 @@ def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
         "step": pick("Step Type"),
     }
 
-def insert_line_breaks_generic(
-    df: pd.DataFrame, x_col: str, y_col: str,
-    *,
-    seg_cycle: bool = False,
-    seg_step: bool = False,
-    seg_cap_reset: bool = False,
-    seg_current_flip: bool = False,
-    seg_x_reverse: bool = False,
-    x_rev_eps: float = 0.0,
-    cap_col_name: Optional[str] = None
-) -> pd.DataFrame:
-    if df.empty or x_col not in df.columns or y_col not in df.columns:
-        return df
-
-    # validate capacity column request
-    if seg_cap_reset:
-        if not isinstance(cap_col_name, str) or cap_col_name not in df.columns:
-            seg_cap_reset = False  # disable if unusable
-
-    # ensure unique columns (avoid pandas concat alignment errors)
-    d = df.loc[:, ~pd.Index(df.columns).duplicated()].reset_index(drop=True).copy()
-    break_pos: List[int] = []
-
-    # 1) Cycle changes
-    if seg_cycle and "Cycle Index" in d.columns:
-        cyc = d["Cycle Index"].values
-        for i in range(len(d) - 1):
-            if pd.notna(cyc[i]) and pd.notna(cyc[i+1]) and cyc[i+1] != cyc[i]:
-                break_pos.append(i)
-
-    # 2) Step-type changes
-    if seg_step and "Step Type" in d.columns:
-        stype = d["Step Type"].astype(str)
-        for i in range(len(d) - 1):
-            if stype.iloc[i+1] != stype.iloc[i]:
-                break_pos.append(i)
-
-    # 3) Capacity resets to 0
-    if seg_cap_reset:
-        try:
-            cap_series = pd.to_numeric(d[cap_col_name], errors="coerce").fillna(0)
-            idxs = cap_series[(cap_series.shift(-1) == 0) & (cap_series > 0)].index.tolist()
-            break_pos.extend(idxs)
-        except Exception:
-            pass  # if anything odd happens, just skip this rule
-
-    # 4) Current sign flips
-    if seg_current_flip and "Current(mA)" in d.columns:
-        cur = pd.to_numeric(d["Current(mA)"], errors="coerce")
-        sgn = np.sign(cur)
-        for i in range(len(d) - 1):
-            if not np.isnan(sgn.iloc[i]) and not np.isnan(sgn.iloc[i+1]) and sgn.iloc[i+1] != sgn.iloc[i]:
-                break_pos.append(i)
-
-    # 5) X reversals (direction change)
-    if seg_x_reverse:
-        x_num = pd.to_numeric(d[x_col], errors="coerce")
-        if x_num.isna().all():
-            x_num = pd.to_timedelta(d[x_col].astype(str), errors="coerce").dt.total_seconds()
-        dx = x_num.diff()
-        for i in range(1, len(d)):
-            if pd.notna(dx.iloc[i]) and abs(dx.iloc[i]) > x_rev_eps and dx.iloc[i] * dx.iloc[i-1] < 0:
-                break_pos.append(i-1)
-
-    if not break_pos:
-        return d
-
-    pieces = []
-    last = 0
-    for idx in sorted(set(break_pos)):
-        pieces.append(d.iloc[last:idx+1])
-        # force a gap for x/y only
-        nan_row = {c: (np.nan if c in [x_col, y_col] else d.iloc[idx].get(c)) for c in d.columns}
-        pieces.append(pd.DataFrame([nan_row]))
-        last = idx + 1
-    pieces.append(d.iloc[last:])
-    return _concat_nonempty(pieces)
-
+# ----------------------------
+# DCIR function (kept compatible)
+# ----------------------------
 def compute_dcir_for_ndax(
     df: pd.DataFrame,
     cell_id: str,
     pulse_length_s: float,
-    soc_mode: str = "design",           # "design" or "data"
-    soc_levels=None,                    # e.g. [80, 50, 20, 5] for design mode
+    soc_mode: str = "design",
+    soc_levels=None,
     pulses_per_soc: int = 2,
-    pre_rest_window_s: float = 60.0,    # last 60 s of rest
-    inst_window_s=(0.5, 1.5),           # instant = 0.5–1.5 s into pulse
-    end_window_s: float = 5.0,          # last 5 s of pulse
-    pulse_tol_s: float = 2.0,           # duration tolerance
-    current_threshold_A: float = 0.001, # reject tiny-current noise
+    pre_rest_window_s: float = 60.0,
+    inst_window_s=(0.5, 1.5),
+    end_window_s: float = 5.0,
+    pulse_tol_s: float = 2.0,
+    current_threshold_A: float = 0.001,
 ) -> pd.DataFrame:
-    """
-    DCIR from NDAX-like DataFrame.
-
-    df must have (after normalize_neware_headers / infer_rest_step):
-      - 'Step_Index'
-      - 'Step Type'         (Rest / Chg / DChg / CCCV_Chg / CC_DChg / CC_Chg, etc.)
-      - 'Time'              (step-local seconds)
-      - 'Voltage(V)' or 'Voltage'
-      - 'Current(mA)'
-      - optional: 'Discharge_Capacity(mAh)', 'Charge_Capacity(mAh)'
-
-    Returns one row per DCIR pulse with:
-      Cell_ID, Pulse_Direction, SoC_label, pulse_duration_s,
-      DCIR_<pulse_length>s_Ohm, DCIR_inst_Ohm
-    """
     if df is None or df.empty:
         return pd.DataFrame()
 
     d = df.copy()
     cols = d.columns
 
-    # --- column mapping (matches your NDAX frames) ---
     if "Step_Index" not in cols:
         raise ValueError("Expected 'Step_Index' column but did not find it.")
 
@@ -649,11 +444,9 @@ def compute_dcir_for_ndax(
     volt_col = "Voltage(V)" if "Voltage(V)" in cols else "Voltage"
     cur_col = "Current(mA)"
 
-    # numeric helpers
     d[time_col] = pd.to_numeric(d[time_col], errors="coerce")
     d["Current_A"] = pd.to_numeric(d[cur_col], errors="coerce") / 1000.0
 
-    # ---- summarise each Step_Index ----
     step_summary = (
         d.groupby(step_index_col)
          .agg(
@@ -669,7 +462,6 @@ def compute_dcir_for_ndax(
     status_str = step_summary["Status"].astype(str).str.lower()
     is_rest = status_str.str.contains("rest")
 
-    # ---- pulse detection: duration ~ pulse_length, not Rest, non-zero current ----
     is_pulse_dur = step_summary["duration_s"].between(
         pulse_length_s - pulse_tol_s,
         pulse_length_s + pulse_tol_s,
@@ -682,20 +474,12 @@ def compute_dcir_for_ndax(
     dcir_end_col = f"DCIR_{int(round(pulse_length_s))}s_Ohm"
 
     if not pulse_steps:
-        return pd.DataFrame(
-            columns=[
-                "Cell_ID",
-                "Pulse_Direction",
-                "SoC_label",
-                "pulse_duration_s",
-                dcir_end_col,
-                "DCIR_inst_Ohm",
-            ]
-        )
+        return pd.DataFrame(columns=[
+            "Cell_ID", "Pulse_Direction", "SoC_label", "pulse_duration_s",
+            dcir_end_col, "DCIR_inst_Ohm",
+        ])
 
-    # ---- SOC labelling helpers ----
-
-    # Design-based SOC: assign labels in pulse order
+    # Design-based SOC
     soc_labels_by_step = {}
     if soc_mode == "design" and soc_levels:
         expanded = []
@@ -704,16 +488,15 @@ def compute_dcir_for_ndax(
         for i, step in enumerate(sorted(pulse_steps)):
             soc_labels_by_step[step] = expanded[i] if i < len(expanded) else expanded[-1]
 
-    # Data-based SOC from capacity at PRECEDING REST step
+    # Data-based SOC capacity ref
     q_ref = None
-    q_ref_source = None  # "discharge" or "charge"
+    q_ref_source = None
     if soc_mode == "data":
         if "Discharge_Capacity(mAh)" in cols:
             q_ref = pd.to_numeric(d["Discharge_Capacity(mAh)"], errors="coerce").max()
             if math.isfinite(q_ref) and q_ref > 0:
                 q_ref_source = "discharge"
-        if (q_ref is None or not math.isfinite(q_ref) or q_ref <= 0) and \
-           "Charge_Capacity(mAh)" in cols:
+        if (q_ref is None or not math.isfinite(q_ref) or q_ref <= 0) and "Charge_Capacity(mAh)" in cols:
             q_ref = pd.to_numeric(d["Charge_Capacity(mAh)"], errors="coerce").max()
             if math.isfinite(q_ref) and q_ref > 0:
                 q_ref_source = "charge"
@@ -725,11 +508,9 @@ def compute_dcir_for_ndax(
     inst_start, inst_end = inst_window_s
 
     records = []
-
     for step in sorted(pulse_steps):
         step_info = step_summary.loc[step]
 
-        # ---------- find preceding Rest step ----------
         prior_rests = rest_steps[rest_steps < step]
         if len(prior_rests) == 0:
             continue
@@ -740,7 +521,7 @@ def compute_dcir_for_ndax(
         if df_rest.empty or df_pulse.empty:
             continue
 
-        # ---------- pre-pulse window: last pre_rest_window_s of Rest ----------
+        # pre-pulse rest window
         rt_max = df_rest[time_col].max()
         rt_min = df_rest[time_col].min()
         rest_start = max(rt_min, rt_max - pre_rest_window_s)
@@ -751,17 +532,15 @@ def compute_dcir_for_ndax(
         v_pre = pd.to_numeric(rest_win[volt_col], errors="coerce").mean()
         i_pre_mA = pd.to_numeric(rest_win[cur_col], errors="coerce").mean()
 
-        # ---------- instantaneous window (early in the pulse) ----------
-        inst = df_pulse[
-            (df_pulse[time_col] >= inst_start) & (df_pulse[time_col] <= inst_end)
-        ]
+        # instant window
+        inst = df_pulse[(df_pulse[time_col] >= inst_start) & (df_pulse[time_col] <= inst_end)]
         if inst.empty:
             inst = df_pulse.head(min(3, len(df_pulse)))
 
         v_inst = pd.to_numeric(inst[volt_col], errors="coerce").mean()
         i_inst_mA = pd.to_numeric(inst[cur_col], errors="coerce").mean()
 
-        # ---------- end-of-pulse window (last end_window_s) ----------
+        # end window
         pt_max = df_pulse[time_col].max()
         pt_min = df_pulse[time_col].min()
         end_start = max(pt_min, pt_max - end_window_s)
@@ -772,22 +551,20 @@ def compute_dcir_for_ndax(
         v_end = pd.to_numeric(end_win[volt_col], errors="coerce").mean()
         i_end_mA = pd.to_numeric(end_win[cur_col], errors="coerce").mean()
 
-        # ---------- ΔV / ΔI (same as your SAFT/POCO scripts) ----------
+        # ΔV/ΔI
         delta_V_inst = v_pre - v_inst
         delta_I_inst_A = (i_inst_mA - i_pre_mA) / 1000.0
-
         delta_V_end = v_pre - v_end
         delta_I_end_A = (i_end_mA - i_pre_mA) / 1000.0
 
         dcir_inst = math.nan
         dcir_end = math.nan
-
         if abs(delta_I_inst_A) > 0:
             dcir_inst = abs(delta_V_inst / delta_I_inst_A)
         if abs(delta_I_end_A) > 0:
             dcir_end = abs(delta_V_end / delta_I_end_A)
 
-        # Pulse direction from sign of current
+        # direction
         pulse_i_mean = df_pulse["Current_A"].mean()
         if pulse_i_mean > 0:
             direction = "charge"
@@ -796,15 +573,11 @@ def compute_dcir_for_ndax(
         else:
             direction = "unknown"
 
-        # ---------- SOC label ----------
+        # SoC label
         soc_label = None
-
         if soc_mode == "design" and soc_levels:
             soc_label = soc_labels_by_step.get(step, None)
-
         elif soc_mode == "data" and q_ref and q_ref_source:
-            # Use capacity at PRECEDING REST as SOC indicator
-            q_rest = None
             if q_ref_source == "discharge" and "Discharge_Capacity(mAh)" in cols:
                 q_rest = pd.to_numeric(df_rest["Discharge_Capacity(mAh)"], errors="coerce").max()
                 if math.isfinite(q_rest):
@@ -813,163 +586,194 @@ def compute_dcir_for_ndax(
                 q_rest = pd.to_numeric(df_rest["Charge_Capacity(mAh)"], errors="coerce").max()
                 if math.isfinite(q_rest):
                     soc_label = 100.0 * (q_rest / q_ref)
-
             if soc_label is not None:
                 soc_label = round(float(soc_label), 1)
 
-        records.append(
-            {
-                "Cell_ID": cell_id,
-                "Pulse_Direction": direction,
-                "SoC_label": soc_label,
-                "pulse_duration_s": round(float(step_info["duration_s"]), 3),
-                dcir_end_col: dcir_end,
-                "DCIR_inst_Ohm": dcir_inst,
-            }
-        )
+        records.append({
+            "Cell_ID": cell_id,
+            "Pulse_Direction": direction,
+            "SoC_label": soc_label,
+            "pulse_duration_s": round(float(step_info["duration_s"]), 3),
+            dcir_end_col: dcir_end,
+            "DCIR_inst_Ohm": dcir_inst,
+        })
 
     return pd.DataFrame.from_records(records)
 
 
 # ----------------------------
-# NDAX-only loader
+# NDAX loader (bytes-based cache)
 # ----------------------------
-@st.cache_data(show_spinner=False)
-def load_ndax(file) -> pd.DataFrame:
+
+# Keep only the columns you use across the app (big memory win).
+KEEP_COLS = [
+    "Total Time", "Time",
+    "Voltage(V)", "Current(mA)",
+    "Spec. Cap.(mAh/g)", "Capacity(mAh)",
+    "Chg. Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)",
+    "Chg. Cap.(mAh)", "DChg. Cap.(mAh)",
+    "Cycle Index", "Step Type",
+    "Step_Index",
+    "Charge_Capacity(mAh)", "Discharge_Capacity(mAh)",
+    "Timestamp", "Record Time", "DateTime", "Date Time", "System Time", "Local Time",
+]
+
+def _md5_bytes(b: bytes) -> str:
+    return hashlib.md5(b).hexdigest()
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
+def load_ndax_bytes(filename: str, file_bytes: bytes, file_md5: str) -> pd.DataFrame:
+    # file_md5 is used to make cache key explicit & stable
     if nda is None:
-        st.error("NewareNDA is not installed. Run: python -m pip install NewareNDA")
-        raise RuntimeError("NewareNDA missing")
-    name = getattr(file, "name", "uploaded")
-    if Path(name).suffix.lower() != ".ndax":
-        st.error("This app supports only .ndax files.")
-        raise RuntimeError("Unsupported file type")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".ndax") as tmp:
-        tmp.write(file.getbuffer())
-        tmp_path = tmp.name
+        raise RuntimeError("NewareNDA is not installed. Install: pip install NewareNDA")
+
+    if Path(filename).suffix.lower() != ".ndax":
+        raise RuntimeError("Only .ndax files are supported.")
+
+    tmp_path = None
     try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ndax") as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
         if build_ndax_df is not None:
             df = build_ndax_df(tmp_path, cycle_mode="auto")
         else:
             df = nda.read(tmp_path)
-    except Exception as e:
-        st.error(f"Failed to read NDAX: {e}")
-        raise
-    # Normalize & infer Rest for better segmentation later
-    df = normalize_neware_headers(df)
-    df = infer_rest_step(df)
-    return df
+
+        df = normalize_neware_headers(df)
+        df = infer_rest_step(df)
+
+        keep = [c for c in KEEP_COLS if c in df.columns]
+        df = df.loc[:, keep].copy()
+
+        return df
+
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
 
 # ----------------------------
-# Sidebar upload (NDAX only)
+# Header / logo
+# ----------------------------
+c1, c2, c3 = st.columns([1, 1, 1])
+with c2:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH))
+    else:
+        st.caption(f"Logo missing: {LOGO_PATH.name}")
+
+st.title("🔋 BATTERY CELL DATA — VISUALIZER 📈")
+st.caption("Built by the Preli team")
+
+# ----------------------------
+# Sidebar: upload + parse (GATED)
 # ----------------------------
 st.sidebar.header("Upload NDAX files only")
-uploaded_files = st.sidebar.file_uploader(
-    "Drop Neware .ndax files (multiple allowed)",
-    type=["ndax"], accept_multiple_files=True
-)
 
-if not uploaded_files:
-    st.info("Upload one or more NDAX files to begin.")
+# Provide an easy way to clear state
+if st.sidebar.button("🧹 Clear cache data"):
+    for k in ["parsed_by_file", "file_checks", "uploaded_names_cache"]:
+        if k in st.session_state:
+            del st.session_state[k]
+    st.rerun()
+
+with st.sidebar.form("upload_form", clear_on_submit=False):
+    uploaded_files = st.file_uploader(
+        "Drop Neware .ndax files (multiple allowed)",
+        type=["ndax"],
+        accept_multiple_files=True,
+    )
+    parse_now = st.form_submit_button("🚀 launch files")
+
+if not uploaded_files and "parsed_by_file" not in st.session_state:
+    st.info("Upload one or more NDAX files and press 🚀 launch.")
     st.stop()
 
+# Parse only when user clicks, or use existing parsed data
+if parse_now:
+    parsed: Dict[str, pd.DataFrame] = {}
+    prog = st.sidebar.progress(0)
+    for i, uf in enumerate(uploaded_files):
+        b = uf.getvalue()
+        h = _md5_bytes(b)
+        df = load_ndax_bytes(uf.name, b, h)
+        df["__file"] = uf.name
+        df["__family"] = family_from_filename(uf.name)
+        parsed[uf.name] = df
+        prog.progress((i + 1) / max(1, len(uploaded_files)))
+    st.sidebar.success(f"Parsed {len(parsed)} file(s).")
+    st.session_state["parsed_by_file"] = parsed
+    st.session_state["uploaded_names_cache"] = sorted(list(parsed.keys()))
+
+if "parsed_by_file" not in st.session_state:
+    st.info("Upload your files, then click **launch files**.")
+    st.stop()
+
+parsed_by_file: Dict[str, pd.DataFrame] = st.session_state["parsed_by_file"]
+
+# If user uploads new set but didn't click parse, keep old parsed; show hint
+current_upload_names = sorted([uf.name for uf in uploaded_files]) if uploaded_files else []
+cached_names = st.session_state.get("uploaded_names_cache", sorted(list(parsed_by_file.keys())))
+if current_upload_names and set(current_upload_names) != set(cached_names) and not parse_now:
+    st.warning("You changed the uploaded files. Click **launch files** to apply the new upload set.")
+
+# ----------------------------
+# Sidebar: options
+# ----------------------------
 with st.sidebar.expander("CE options", expanded=True):
     cell_type_sel = st.radio(
         "Cell type (for CE direction)",
         ["anode", "cathode", "full"],
-        index=1,  # default to cathode
-        horizontal=True
+        index=1,
+        horizontal=True,
     )
 
-palette_name = st.sidebar.selectbox("Palette", list(PALETTES.keys()), index=0)
+palette_name = st.sidebar.selectbox("Palette 🎨", list(PALETTES.keys()), index=0)
 palette = PALETTES[palette_name]
 
-# Parse files
-all_frames: List[pd.DataFrame] = []
-source_names: List[str] = []
-with st.spinner("Parsing NDAX files…"):
-    for f in uploaded_files:
-        df = load_ndax(f)
-        df["__file"] = f.name
-        all_frames.append(df)
-        source_names.append(f.name)
-
-frames = [df for df in all_frames if df is not None and not df.empty]
-if not frames:
-    st.error("All uploaded NDAX files were empty.")
-    st.stop()
-raw = _concat_nonempty(frames)
-G = detect_columns(list(raw.columns))
-
-# All distinct file names present
-files_all = sorted(raw["__file"].astype(str).unique().tolist())
-
-st.sidebar.header("Files to plot")
-# Initialize (or refresh) the checkbox state if file set changed
-if "file_checks" not in st.session_state or set(st.session_state.file_checks.keys()) != set(files_all):
-    st.session_state.file_checks = {f: True for f in files_all}
-
-c1, c2 = st.sidebar.columns(2)
-with c1:
-    if st.button("Select all"):
-        st.session_state.file_checks = {f: True for f in files_all}
-with c2:
-    if st.button("Select none"):
-        st.session_state.file_checks = {f: False for f in files_all}
-
-# Render one checkbox per file
-for f in files_all:
-    st.session_state.file_checks[f] = st.sidebar.checkbox(
-        f, value=st.session_state.file_checks.get(f, True)
-    )
-
-# The active selection
-selected_sources = [f for f, on in st.session_state.file_checks.items() if on]
-
-if not selected_sources:
-    st.info("Select at least one file in the sidebar to plot.")
-    st.stop()
-
-# Filter once and use `data` everywhere below instead of `raw`
-data = raw[raw["__file"].isin(selected_sources)].copy()
-
-
-# Build per-file palette
-selected_sources = sorted(list({f.name for f in uploaded_files}))
-color_map = {src: palette[i % len(palette)] for i, src in enumerate(selected_sources)}
-
-# Preview
-with st.expander("Preview parsed data"):
-    st.dataframe(raw.drop(columns="__file").head(900))
-
-with st.expander("active mass (read-only)"):
-    lines = []
-    for src, df_src in zip(source_names, all_frames):
-        am = getattr(df_src, "attrs", {}).get("active_mass_g", None)
-        if isinstance(am, (int, float)) and am > 0:
-            lines.append(f"• {src}: active_mass_g = {am:.6f} g")
-    st.markdown("\n".join(lines) if lines else "_No active_mass_g found in uploaded files._")
-
-with st.sidebar.expander("Formatting", expanded=True):
+with st.sidebar.expander("Formatting", expanded=False):
     show_markers = st.checkbox("Show markers", False)
     marker_size = st.number_input("Marker size", 1, 20, 4)
     line_width = st.number_input("Line width", 1.0, 10.0, 2.5, 0.5)
-    show_grid = st.checkbox("Show grid", True)
+    show_grid_global = st.checkbox("Show grid", True)
 
-def family_from_filename(name: str) -> str:
-    stem = Path(str(name)).stem.lower()
-    for sep in ["_", "-", " "]:
-        if sep in stem:
-            stem = stem.split(sep)[0]; break
-    return re.sub(r"\d+$", "", stem) or stem
+# ----------------------------
+# File selection checkboxes
+# ----------------------------
+with st.sidebar.expander("Files to plot", expanded=False):
 
-# annotate families once
-if "__family" not in raw.columns:
-    raw["__family"] = raw["__file"].apply(family_from_filename)
+    files_all = sorted(list(parsed_by_file.keys()))
+    if "file_checks" not in st.session_state or set(st.session_state["file_checks"].keys()) != set(files_all):
+        st.session_state["file_checks"] = {f: True for f in files_all}
 
-families_in_data = sorted(raw["__family"].unique().tolist())
-files_in_data    = sorted(raw["__file"].unique().tolist())
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("Select all", key="files_select_all"):
+            st.session_state["file_checks"] = {f: True for f in files_all}
+    with colB:
+        if st.button("Select none", key="files_select_none"):
+            st.session_state["file_checks"] = {f: False for f in files_all}
 
-# ---- global color mode (applies to all tabs) ----
+    for f in files_all:
+        st.session_state["file_checks"][f] = st.checkbox(
+            f,
+            value=st.session_state["file_checks"].get(f, True),
+            key=f"file_cb__{f}",
+        )
+
+selected_files = [f for f, on in st.session_state["file_checks"].items() if on]
+if not selected_files:
+    st.info("Select at least one file in the sidebar to plot.")
+    st.stop()
+# ----------------------------
+# Color mode (global)
+# ----------------------------
+families_in_data = sorted({family_from_filename(f) for f in files_all})
 with st.sidebar.expander("Color mode", expanded=True):
     color_mode_global = st.radio(
         "Color by",
@@ -978,8 +782,7 @@ with st.sidebar.expander("Color mode", expanded=True):
         horizontal=True
     )
 
-# palette mapping for both modes
-color_map_file = {src: palette[i % len(palette)] for i, src in enumerate(files_in_data)}
+color_map_file = {src: palette[i % len(palette)] for i, src in enumerate(files_all)}
 color_map_fam  = {fam: palette[i % len(palette)] for i, fam in enumerate(families_in_data)}
 
 def color_for_src(src: str) -> str:
@@ -988,45 +791,96 @@ def color_for_src(src: str) -> str:
     return color_map_fam.get(family_from_filename(src), palette[0])
 
 # ----------------------------
-# Tabs
+# Utility: get selected frames
 # ----------------------------
+def get_selected_frames() -> List[pd.DataFrame]:
+    return [parsed_by_file[f] for f in selected_files if f in parsed_by_file]
 
-xy_tab, vt_tab, vq_tab, cap_tab, ce_tab, dcir_tab,box_tab, = st.tabs([
-    "XY Builder", "Voltage–Time", "Voltage–Capacity", "Capacity vs Cycle", "Capacity & CE","DCIR","ICE Boxplot",])
+def get_union_columns(frames: List[pd.DataFrame]) -> List[str]:
+    cols = []
+    seen = set()
+    for df in frames:
+        for c in df.columns:
+            if c not in seen:
+                seen.add(c)
+                cols.append(c)
+    return cols
 
-#--------------------------------------
-# ---------- XY Builder ---------------
-# -------------------------------------
-with xy_tab:
+frames_selected = get_selected_frames()
+union_cols = get_union_columns(frames_selected)
+G = detect_columns(union_cols)
+
+# ----------------------------
+# View selector (LAZY EXECUTION)
+# ----------------------------
+PAGES = [
+    "XY Builder", "Voltage–Time", "Voltage–Capacity",
+    "Capacity vs Cycle", "Capacity & CE", "DCIR",
+    "ICE Boxplot", "Raw File Preview",
+]
+
+
+view = st.segmented_control(
+    "View selector",
+    options=PAGES,
+    default=PAGES[2],
+    key="view_selector_main",
+    label_visibility="collapsed",
+)
+# ----------------------------
+# Raw File Preview
+# ----------------------------
+if view == "Raw File Preview":
+    st.subheader("Preview parsed data (first rows per file)")
+    max_rows = st.number_input("Rows per file", min_value=5, max_value=1000, value=900, step=50)
+    for f in selected_files:
+        df = parsed_by_file[f]
+        am = None
+        try:
+            am = df.attrs.get("active_mass_g", None)
+        except Exception:
+            am = None
+        if isinstance(am, (int, float)) and am > 0:
+            am_str = f"{am:.6f} g"
+        else:
+            am_str = "N/A"
+        st.markdown(f"**{f}**  —  shape: {df.shape}  —  active_mass_g: {am_str}")
+        st.dataframe(df.head(int(max_rows)), width="stretch")
+
+    st.stop()
+
+# ----------------------------
+# XY Builder
+# ----------------------------
+if view == "XY Builder":
     st.subheader("Free-form XY plot builder")
 
-    all_cols = [c for c in data.columns if c != "__file"]
-    numeric_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(data[c])]
+    all_cols = [c for c in union_cols if c not in ["__file", "__family"]]
+    # numeric columns = numeric in at least one selected frame
+    numeric_cols = []
+    for c in all_cols:
+        for df in frames_selected:
+            if c in df.columns and pd.api.types.is_numeric_dtype(df[c]):
+                numeric_cols.append(c)
+                break
 
-    # sensible defaults
+    if not all_cols:
+        st.warning("No columns found in selected files.")
+        st.stop()
+
     if "xy_x" not in st.session_state:
-        st.session_state.xy_x = G.get("time") if G.get("time") in all_cols else (all_cols[0] if all_cols else None)
+        st.session_state.xy_x = G.get("time") if G.get("time") in all_cols else all_cols[0]
     if "xy_y" not in st.session_state or not st.session_state.xy_y:
         defaults = [c for c in [G.get("voltage"), G.get("capacity")] if c in numeric_cols]
         st.session_state.xy_y = defaults[:1] if defaults else (numeric_cols[:1] if numeric_cols else [])
 
-    def family_from_filename(name: str) -> str:
-        stem = Path(str(name)).stem.lower()
-        for sep in ["_", "-", " "]:
-            if sep in stem:
-                stem = stem.split(sep)[0]; break
-        return re.sub(r"\d+$", "", stem) or stem
-
-    # ---- Compact, aligned XY controls ----
-    row1 = st.columns([1.1, 1.2, 0.9])   # X, Y, tools
+    row1 = st.columns([1.1, 1.2, 0.9])
     with row1[0]:
         x_col = st.selectbox(
-        "X axis",
-        all_cols,
-        index=(all_cols.index(st.session_state.xy_x) if st.session_state.xy_x in all_cols else 0),
-        key="xy_x_select",
+            "X axis",
+            all_cols,
+            index=(all_cols.index(st.session_state.xy_x) if st.session_state.xy_x in all_cols else 0),
         )
-    # Auto-align if X is the detected time column (hide the toggle)
     is_time_x = (x_col == G.get("time"))
     align_t0 = is_time_x
     if is_time_x:
@@ -1034,35 +888,30 @@ with xy_tab:
 
     with row1[1]:
         y_cols = st.multiselect(
-        "Y axis (one or more)",
-        numeric_cols,
-        default=[y for y in st.session_state.xy_y if y in numeric_cols] or (numeric_cols[:1] if numeric_cols else []),
-        key="xy_y_multi",
+            "Y axis (one or more)",
+            numeric_cols,
+            default=[y for y in st.session_state.xy_y if y in numeric_cols] or (numeric_cols[:1] if numeric_cols else []),
         )
-
     with row1[2]:
         rolling = st.number_input("Rolling mean window (pts)", 1, 9999, 1, 1)
         use_global_colors_xy = st.checkbox(
-        "Use global colors here",
-        value=False,
-        help="If on, XY uses the sidebar Color by mode; if off, random colors.",
+            "Use global colors here",
+            value=True,
+            help="If off, Plotly default color cycle is used.",
         )
 
-    # Y limits (side-by-side)
     row2 = st.columns([1, 1, 0.6])
     with row2[0]:
-                y_min = st.text_input("Y min (blank=auto)", "")
+        y_min = st.text_input("Y min (blank=auto)", "")
     with row2[1]:
-                y_max = st.text_input("Y max (blank=auto)", "")
+        y_max = st.text_input("Y max (blank=auto)", "")
 
-    # X limits (side-by-side)
     row3 = st.columns([1, 1, 0.6])
     with row3[0]:
-            x_min = st.text_input("X min (blank=auto)", "")
+        x_min = st.text_input("X min (blank=auto)", "")
     with row3[1]:
-            x_max = st.text_input("X max (blank=auto)", "")
+        x_max = st.text_input("X max (blank=auto)", "")
 
-    # persist selections
     st.session_state.xy_x = x_col
     st.session_state.xy_y = y_cols
 
@@ -1070,759 +919,643 @@ with xy_tab:
         st.warning("Pick at least one Y column to plot.")
         st.stop()
 
-    plot_df = data.dropna(subset=[x_col] + y_cols).copy()
-        # build time vector if aligning
-    if align_t0 and is_time_x:
-        plot_df["_x"] = build_global_time_seconds(plot_df, time_col=G["time"], cycle_col="Cycle Index", step_col="Step Type")
-        x_used = "_x"
-    else:
-        x_used = x_col
-
-    # color mapping
-    # color mapping — rely on global helper + palette
-    # (raw["__family"] was already created globally)
-    files_in_view = plot_df["__file"].astype(str).unique().tolist()
-
-    # optional smoothing
-    if rolling > 1:
-        plot_df = plot_df.sort_values(["__file", x_used])
-        for y in y_cols:
-            if y in plot_df.columns:
-                plot_df[y] = plot_df.groupby("__file")[y].transform(lambda s: s.rolling(rolling, min_periods=1).mean())
-
     fig = go.Figure()
     added = False
 
-    cap_like = ["Spec. Cap.(mAh/g)", "Capacity(mAh)", "Chg. Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)"]
-    is_time_plot = (x_used == "_x") or (x_col == G.get("time"))
-    cyc_col = G.get("cycle")
+    for src in selected_files:
+        df = parsed_by_file[src]
+        if x_col not in df.columns:
+            continue
 
-    for y in y_cols:
-        for src in files_in_view:
-            s = plot_df[plot_df["__file"] == src].copy()
-            if s.empty or x_used not in s.columns or y not in s.columns:
+        # build x used
+        if align_t0:
+            df_local = df.dropna(subset=[x_col]).copy()
+            df_local["_x"] = build_global_time_seconds(df_local, time_col=x_col, cycle_col="Cycle Index", step_col="Step Type")
+            x_used = "_x"
+        else:
+            df_local = df
+
+        # optional smoothing (per file)
+        if rolling > 1:
+            df_local = df_local.sort_values(x_used)
+            for y in y_cols:
+                if y in df_local.columns:
+                    df_local[y] = pd.to_numeric(df_local[y], errors="coerce")
+                    df_local[y] = df_local[y].rolling(rolling, min_periods=1).mean()
+
+        for y in y_cols:
+            if y not in df_local.columns:
                 continue
-
-            # SPECIAL: Cycle Index on X with capacity on Y → aggregate max per cycle
-            if cyc_col and cyc_col in s.columns and x_used == cyc_col and y in cap_like:
-                s["_cyc"] = pd.to_numeric(s[cyc_col], errors="coerce")
-                grp = (s.dropna(subset=["_cyc", y])
-                         .groupby("_cyc", as_index=False)[y]
-                         .max()
-                         .sort_values("_cyc"))
-                if grp.empty:
-                    continue
-                s2 = grp.rename(columns={"_cyc": x_used})
-
-            # TIME on X in XY builder → keep continuous
-            elif is_time_plot:
-                s2 = s
-
-            # Otherwise: apply generic line breaks (cycle/step/capacity-reset)
-            else:
-                cap_name = next((c for c in cap_like if c in s.columns), None)
-                order = [x_used, y, "__file", "Cycle Index", "Step Type", "Current(mA)", cap_name]
-                cols_needed = []
-                for c in order:
-                    if isinstance(c, str) and c in s.columns and c not in cols_needed:
-                        cols_needed.append(c)
-                s2 = insert_line_breaks_generic(
-                    s[cols_needed], x_used, y,
-                    seg_cycle=("Cycle Index" in s.columns),
-                    seg_step=("Step Type" in s.columns),
-                    seg_cap_reset=(isinstance(cap_name, str) and cap_name in s.columns and cap_name != x_used),
-                    cap_col_name=cap_name,
-                    seg_current_flip=False,
-                    seg_x_reverse=False
-                )
-
-            if s2.empty:
+            s = df_local.dropna(subset=[x_used, y])
+            if s.empty:
                 continue
 
             if use_global_colors_xy:
-                c = color_for_src(src)  # global helper from the sidebar section
+                c = color_for_src(src)
                 fig.add_trace(go.Scatter(
-                x=s2[x_used], y=s2[y],
-                mode="lines",
-                name=pretty_src(src),
-                line=dict(color=c, width=line_width),
-                marker=dict(size=marker_size)
+                    x=s[x_used], y=s[y],
+                    mode="lines",
+                    name=f"{pretty_src(src)} — {y}",
+                    line=dict(color=c, width=line_width),
+                    marker=dict(size=marker_size)
                 ))
             else:
                 fig.add_trace(go.Scatter(
-                x=s2[x_used], y=s2[y],
-                mode="lines",
-                name=pretty_src(src),
-                line=dict(width=line_width),   # no color → Plotly default cycle
-                marker=dict(size=marker_size)
-                ))      
+                    x=s[x_used], y=s[y],
+                    mode="lines",
+                    name=f"{pretty_src(src)} — {y}",
+                    line=dict(width=line_width),
+                    marker=dict(size=marker_size)
+                ))
             added = True
 
     if not added:
-        st.warning("No data drawn — check your column choices or filters.")
+        st.warning("No data drawn — check your column choices.")
     else:
-        # axes/legend styling
         try:
-            if x_min != "": fig.update_xaxes(range=[float(x_min), float(x_max) if x_max != "" else None])
-        except Exception: pass
+            if x_min != "":
+                fig.update_xaxes(range=[float(x_min), float(x_max) if x_max != "" else None])
+        except Exception:
+            pass
         try:
-            if y_min != "": fig.update_yaxes(range=[float(y_min), float(y_max) if y_max != "" else None])
-        except Exception: pass
+            if y_min != "":
+                fig.update_yaxes(range=[float(y_min), float(y_max) if y_max != "" else None])
+        except Exception:
+            pass
+
         fig.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
-        if show_grid:
+        if show_grid_global:
             fig.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
             fig.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        st.plotly_chart(fig, use_container_width=True)
 
+        st.plotly_chart(fig, width="stretch", config=CAMERA_CFG)
 
-with vt_tab:
+    st.stop()
+
+# ----------------------------
+# Voltage–Time
+# ----------------------------
+if view == "Voltage–Time":
     st.subheader("Voltage–Time")
-    tcol, vcol = G["time"], G["voltage"]
-    if not tcol or not vcol or tcol not in data.columns or vcol not in data.columns:
+    tcol, vcol = G.get("time"), G.get("voltage")
+    if not tcol or not vcol:
         st.warning("Couldn’t detect time/voltage. Check NDAX headers.")
-    else:
-        dfv = data.dropna(subset=[tcol, vcol]).copy()
+        st.stop()
 
-        unit = st.selectbox("Time units", ["seconds", "minutes", "hours"], 0, key="vt_time_unit")
-        DIV = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
-        ABBR = {"seconds": "s", "minutes": "min", "hours": "h"}
+    unit = st.selectbox("Time units", ["seconds", "minutes", "hours"], 0)
+    DIV = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
+    ABBR = {"seconds": "s", "minutes": "min", "hours": "h"}
 
-        fig_vt = go.Figure()
-        for src in selected_sources:
-            s = dfv[dfv["__file"] == src].copy()
-            if s.empty:
-                continue
+    fig_vt = go.Figure()
+    for src in selected_files:
+        df = parsed_by_file[src]
+        if tcol not in df.columns or vcol not in df.columns:
+            continue
 
-            # Build global, monotonic seconds using YOUR helper
-            s["_t"] = build_global_time_seconds(
-            s, time_col=tcol, cycle_col="Cycle Index", step_col="Step Type"
-            )
+        s = df.dropna(subset=[tcol, vcol]).copy()
+        if s.empty:
+            continue
 
-            s = s.dropna(subset=["_t", vcol]).sort_values("_t")
-            if s.empty:
-                continue
+        s["_t"] = build_global_time_seconds(s, time_col=tcol, cycle_col="Cycle Index", step_col="Step Type")
+        s = s.dropna(subset=["_t", vcol]).sort_values("_t")
+        if s.empty:
+            continue
 
-            fig_vt.add_trace(go.Scatter(
-                x=s["_t"] / DIV[unit],
-                y=s[vcol],
-                name=pretty_src(src),
-                mode=("lines+markers" if show_markers else "lines"),
-                line=dict(color=color_for_src(src), width=line_width),
-                marker=dict(size=marker_size)
-            ))
+        fig_vt.add_trace(go.Scatter(
+            x=s["_t"] / DIV[unit],
+            y=s[vcol],
+            name=pretty_src(src),
+            mode=("lines+markers" if show_markers else "lines"),
+            line=dict(color=color_for_src(src), width=line_width),
+            marker=dict(size=marker_size),
+        ))
 
-        fig_vt.update_layout(
-            template="plotly_white",
-            xaxis_title=f"Time ({ABBR[unit]})",
-            yaxis_title=vcol,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-        )
-       
+    fig_vt.update_layout(
+        template="plotly_white",
+        xaxis_title=f"Time ({ABBR[unit]})",
+        yaxis_title=vcol,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    if show_grid_global:
+        fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+        fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-        if show_grid:
-            fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-            fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+    style_for_ppt(fig_vt)
+    st.plotly_chart(fig_vt, width="stretch", config=CAMERA_CFG)
+    add_ppt_download(fig_vt, filename_base="voltage_time")
+    st.stop()
 
-        style_for_ppt(fig_vt)
-        st.plotly_chart(fig_vt, use_container_width=False, config=CAMERA_CFG)
-        add_ppt_download(fig_vt, filename_base="voltage_time")
-
-# ---------- Voltage–Capacity ----------
-with vq_tab:
+# ----------------------------
+# Voltage–Capacity
+# ----------------------------
+if view == "Voltage–Capacity":
     st.subheader("Voltage–Capacity")
-    ccol, vcol = G["capacity"], G["voltage"]
-    if not ccol or not vcol or ccol not in data.columns or vcol not in data.columns:
+    ccol, vcol = G.get("capacity"), G.get("voltage")
+    if not ccol or not vcol:
         st.warning("Couldn’t detect capacity/voltage. Check NDAX headers.")
-    else:
-        base = data.dropna(subset=[ccol, vcol]).copy()
-        base = infer_rest_step(base)
-        cyc = G["cycle"] if G["cycle"] in base.columns else None
-        if cyc:
-            cycles_available = sorted(pd.unique(base[cyc].dropna()))
-            sel_cycle = st.selectbox("Cycle", ["All"] + cycles_available, 0, key="vq_single_cycle")
+        st.stop()
+
+    # cycle filter (works if cycle exists)
+    cyc_col = G.get("cycle") if G.get("cycle") in union_cols else None
+    cycles_available = None
+    if cyc_col:
+        cyc_values = []
+        for df in frames_selected:
+            if cyc_col in df.columns:
+                cyc_values.append(df[cyc_col].dropna())
+        if cyc_values:
+            cycles_available = sorted(pd.unique(pd.concat(cyc_values, ignore_index=True)))
+
+    sel_cycle = None
+    rng = None
+    if cycles_available:
+        sel_cycle = st.selectbox("Cycle", ["All"] + cycles_available, 0)
+        cmin, cmax = int(min(cycles_available)), int(max(cycles_available))
+        rng = st.slider("Cycle range (optional)", cmin, cmax, (cmin, cmax), 1)
+
+    fig_vq = go.Figure()
+    for src in selected_files:
+        df = parsed_by_file[src]
+        if ccol not in df.columns or vcol not in df.columns:
+            continue
+        s = df.dropna(subset=[ccol, vcol]).copy()
+        if s.empty:
+            continue
+        if cyc_col and cyc_col in s.columns and cycles_available:
             if sel_cycle != "All":
-                base = base[base[cyc] == sel_cycle]
-            if cycles_available:
-                cmin, cmax = int(min(cycles_available)), int(max(cycles_available))
-                rng = st.slider("Cycle range (optional)", cmin, cmax, (cmin, cmax), 1, key="vq_range")
-                if rng != (cmin, cmax) and sel_cycle == "All":
-                    lo, hi = rng
-                    base = base[base[cyc].between(lo, hi)]
-                    st.caption(f"Showing cycles {lo}–{hi}")
+                s = s[s[cyc_col] == sel_cycle]
+            else:
+                lo, hi = rng
+                if (lo, hi) != (int(min(cycles_available)), int(max(cycles_available))):
+                    s = s[s[cyc_col].between(lo, hi)]
+        if s.empty:
+            continue
+        cols = [ccol, vcol, "__file"] + ([cyc_col] if cyc_col and cyc_col in s.columns else []) + (["Step Type"] if "Step Type" in s.columns else [])
+        plot_df = insert_line_breaks_vq(s[cols], cap_col=ccol, v_col=vcol)
 
-        fig_vq = go.Figure()
-        for src in selected_sources:
-            s = base[base["__file"] == src]
-            if s.empty:
-                continue
-    # define the columns we actually need
-            cols = [ccol, vcol, "__file"] + [c for c in ["Cycle Index", "Step Type"] if c in s.columns]
-            plot_df = insert_line_breaks_vq(s[cols], cap_col=ccol, v_col=vcol)
-            fig_vq.add_trace(go.Scatter(
-                x=plot_df[ccol], y=plot_df[vcol], name=pretty_src(src),
-                mode=("lines+markers" if show_markers else "lines"),
-                line=dict(color=color_for_src(src), width=line_width),
-                marker=dict(size=marker_size)
-            ))
-        x_label = f"{ccol}" if "mAh/g" in ccol else ccol
-        fig_vq.update_layout(template="plotly_white", xaxis_title=x_label, yaxis_title=vcol,
-                             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
-        if show_grid:
-            fig_vq.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-            fig_vq.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        
+        fig_vq.add_trace(go.Scatter(
+            x=plot_df[ccol], y=plot_df[vcol],
+            name=pretty_src(src),
+            mode=("lines+markers" if show_markers else "lines"),
+            line=dict(color=color_for_src(src), width=line_width),
+            marker=dict(size=marker_size),
+        ))
 
-        style_for_ppt(fig_vq)
-        st.plotly_chart(fig_vq, use_container_width=False, config=CAMERA_CFG)
-        add_ppt_download(fig_vq, filename_base="voltage_capacity")
+    x_label = f"{ccol}" if "mAh/g" in ccol else ccol
+    fig_vq.update_layout(
+        template="plotly_white",
+        xaxis_title=x_label,
+        yaxis_title=vcol,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    if show_grid_global:
+        fig_vq.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+        fig_vq.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-# ---------- Capacity vs Cycle ----------
-with cap_tab:
+    style_for_ppt(fig_vq)
+    st.plotly_chart(fig_vq, width="stretch", config=CAMERA_CFG)
+    add_ppt_download(fig_vq, filename_base="voltage_capacity")
+    st.stop()
+
+# ----------------------------
+# Capacity vs Cycle
+# ----------------------------
+if view == "Capacity vs Cycle":
     st.subheader("Capacity vs Cycle")
-    cyc = G["cycle"]
+
+    cyc = G.get("cycle")
+    if not cyc:
+        st.info("Need Cycle Index to plot.")
+        st.stop()
+
+    # choose a capacity column that exists in at least one file
     cap_col = None
     for cand in ["Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)", "Capacity(mAh)"]:
-        if cand in data.columns:
+        if cand in union_cols:
             cap_col = cand
             break
-    if not cyc or cyc not in data.columns or cap_col is None:
-        st.info("Need Cycle Index and a capacity column.")
-    else:
-        fig_cap = go.Figure()
-        for src in selected_sources:
-            s = data[data["__file"] == src]
-            cap_cycle = s.groupby(cyc)[cap_col].max().reset_index()
-            if cap_cycle.empty: 
-                continue
-            c = color_for_src(src)
-            fig_cap.add_trace(go.Scatter(
-                x=cap_cycle[cyc], y=cap_cycle[cap_col], name=pretty_src(src),
+    if cap_col is None:
+        st.info("No capacity column detected.")
+        st.stop()
+
+    fig_cap = go.Figure()
+    for src in selected_files:
+        df = parsed_by_file[src]
+        if cyc not in df.columns or cap_col not in df.columns:
+            continue
+        s = df[[cyc, cap_col]].dropna()
+        if s.empty:
+            continue
+        cap_cycle = s.groupby(cyc)[cap_col].max().reset_index()
+        if cap_cycle.empty:
+            continue
+        c = color_for_src(src)
+        fig_cap.add_trace(go.Scatter(
+            x=cap_cycle[cyc], y=cap_cycle[cap_col],
+            name=pretty_src(src),
+            mode=("lines+markers" if show_markers else "lines"),
+            line=dict(color=c, width=line_width),
+            marker=dict(size=marker_size, symbol="circle-open", color=c,
+                        line=dict(color=c, width=max(1, int(line_width - 1)))),
+        ))
+
+    y_label = "Specific capacity (mAh/g)" if "mAh/g" in cap_col else "Capacity (mAh)"
+    fig_cap.update_layout(
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    fig_cap.update_xaxes(title_text="Cycle", showgrid=show_grid_global, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+    fig_cap.update_yaxes(title_text=y_label, showgrid=show_grid_global, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+
+    style_for_ppt(fig_cap)
+    st.plotly_chart(fig_cap, width="stretch", config=CAMERA_CFG)
+    add_ppt_download(fig_cap, filename_base="capacity_vs_cycle")
+    st.stop()
+
+# ----------------------------
+# Capacity & CE
+# ----------------------------
+if view == "Capacity & CE":
+    st.subheader("Capacity & Coulombic Efficiency vs Cycle")
+
+    cyc = G.get("cycle")
+    if not cyc:
+        st.info("Need Cycle Index for CE plot.")
+        st.stop()
+
+    cap_col = None
+    for cand in ["Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)", "Capacity(mAh)"]:
+        if cand in union_cols:
+            cap_col = cand
+            break
+    if cap_col is None:
+        st.info("Need a capacity column for CE plot.")
+        st.stop()
+
+    fig_ce = make_subplots(specs=[[{"secondary_y": True}]])
+    ce_cell_type = "cathode" if cell_type_sel == "full" else cell_type_sel
+
+    for src in selected_files:
+        df = parsed_by_file[src]
+        if df.empty or cyc not in df.columns:
+            continue
+        c = color_for_src(src)
+
+        ce_df = compute_ce(df, cell_type=ce_cell_type)
+        cap_cycle = None
+        if cap_col in df.columns:
+            cap_cycle = df[[cyc, cap_col]].dropna().groupby(cyc)[cap_col].max().reset_index()
+
+        if cap_cycle is not None and not cap_cycle.empty:
+            fig_ce.add_trace(go.Scatter(
+                x=cap_cycle[cyc], y=cap_cycle[cap_col],
+                name=f"Cap — {pretty_src(src)}",
                 mode=("lines+markers" if show_markers else "lines"),
                 line=dict(color=c, width=line_width),
-                marker=dict(
-                    size=marker_size, symbol="circle-open", color=c,
-                    line=dict(color=c, width=max(1, int(line_width - 1)))
-                )       
-            ))
-        y_label = "Specific capacity (mAh/g)" if "mAh/g" in cap_col else "Capacity (mAh)"
-        fig_cap.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        fig_cap.update_xaxes(title_text="Cycle", showgrid=show_grid, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        fig_cap.update_yaxes(title_text=y_label, showgrid=show_grid, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        style_for_ppt(fig_cap)
-        st.plotly_chart(fig_cap, use_container_width=False, config=CAMERA_CFG)
-        add_ppt_download(fig_cap, filename_base="Capacity vs cycle")
+                marker=dict(size=marker_size, symbol="circle-open", color=c,
+                            line=dict(color=c, width=max(1, int(line_width - 1)))),
+            ), secondary_y=False)
 
-# ---------- Capacity & CE ----------
-with ce_tab:
-    st.subheader("Capacity & Coulombic Efficiency vs Cycle")
-    cyc = G["cycle"]
-    cap_col = None
-    for cand in ["Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)", "Capacity(mAh)"]:
-        if cand in data.columns:
-            cap_col = cand
-            break
-    if not cyc or cyc not in data.columns or cap_col is None:
-        st.info("Need Cycle Index and capacity column for CE plot.")
+        if ce_df is not None and not ce_df.empty:
+            fig_ce.add_trace(go.Scatter(
+                x=ce_df["cycle"], y=ce_df["ce"],
+                name=f"CE — {pretty_src(src)}",
+                mode=("lines+markers" if show_markers else "lines"),
+                line=dict(color=c, dash="dash", width=line_width),
+                marker=dict(size=marker_size, symbol="diamond", color=c),
+            ), secondary_y=True)
+
+    y_left = "Specific capacity (mAh/g)" if "mAh/g" in (cap_col or "") else "Capacity (mAh)"
+    show_grid = st.checkbox("Show grid", value=True, key="ce_show_grid")
+    grid_side = st.radio("Y-grid on", ["left", "right", "both", "none"], index=0, horizontal=True)
+
+    fig_ce.update_yaxes(title_text=y_left, secondary_y=False)
+    fig_ce.update_yaxes(title_text="CE (%)", range=[90, 105], secondary_y=True)
+    fig_ce.update_xaxes(title_text="Cycle")
+    fig_ce.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02))
+
+    if show_grid and grid_side != "none":
+        fig_ce.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+        fig_ce.update_yaxes(showgrid=(grid_side in ["left", "both"]), gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5, secondary_y=False)
+        fig_ce.update_yaxes(showgrid=(grid_side in ["right", "both"]), gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5, secondary_y=True)
     else:
-        fig_ce = make_subplots(specs=[[{"secondary_y": True}]])
-        ce_cell_type = "cathode" if cell_type_sel == "full" else cell_type_sel
-        for src in selected_sources:
-            sub = data[data["__file"] == src]
-            if sub.empty: 
-                continue
-            c = color_for_src(src)
-            ce_df = compute_ce(sub, cell_type=ce_cell_type)
-            cap_cycle = sub.groupby(cyc)[cap_col].max().reset_index()
-            if not cap_cycle.empty:
-                fig_ce.add_trace(go.Scatter(
-                    x=cap_cycle[cyc], y=cap_cycle[cap_col], name=f"Cap — {src}",
-                    mode=("lines+markers" if show_markers else "lines"),
-                    line=dict(color=c, width=line_width),
-                    marker=dict(size=marker_size, symbol="circle-open", color=c,
-                                line=dict(color=c, width=max(1, int(line_width - 1))))
-                ), secondary_y=False)
-            if not ce_df.empty:
-                fig_ce.add_trace(go.Scatter(
-                    x=ce_df["cycle"], y=ce_df["ce"], name=f"CE — {src}",
-                    mode=("lines+markers" if show_markers else "lines"),
-                    line=dict(color=c, dash="dash", width=line_width),
-                    marker=dict(size=marker_size, symbol="diamond", color=c)
-                ), secondary_y=True)
-        y_left = "Specific capacity (mAh/g)" if "mAh/g" in (cap_col or "") else "Capacity (mAh)"
+        fig_ce.update_xaxes(showgrid=False)
+        fig_ce.update_yaxes(showgrid=False, secondary_y=False)
+        fig_ce.update_yaxes(showgrid=False, secondary_y=True)
 
-            #UI controls
-        show_grid = st.checkbox("Show grid", value=True, key="ce_show_grid")
-        grid_side = st.radio(
-            "Y-grid on",
-            ["left", "right", "both", "none"],
-            index=0,  # default = left
-            key="ce_grid_side"
-        )
-        
-        fig_ce.update_yaxes(title_text=y_left, secondary_y=False)
-        fig_ce.update_yaxes(title_text="CE (%)", range=[90, 105], secondary_y=True)
-        fig_ce.update_xaxes(title_text="Cycle")
-        fig_ce.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    style_for_ppt(fig_ce)
+    st.plotly_chart(fig_ce, width="stretch", config=CAMERA_CFG)
+    add_ppt_download(fig_ce, filename_base="ce_and_capacity")
+    st.stop()
 
-        if show_grid and grid_side != "none":
-            # X-axis grid ON
-            fig_ce.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-
-            # Left Y grid
-            fig_ce.update_yaxes(
-                showgrid=(grid_side in ["left", "both"]),
-                gridcolor=NV_COLORDICT["nv_gray3"],
-                gridwidth=0.5,
-                secondary_y=False
-            )
-            # Right Y grid
-            fig_ce.update_yaxes(
-                showgrid=(grid_side in ["right", "both"]),
-                gridcolor=NV_COLORDICT["nv_gray3"],
-                gridwidth=0.5,
-                secondary_y=True
-            )
-        else:
-            # turn all grids off
-            fig_ce.update_xaxes(showgrid=False)
-            fig_ce.update_yaxes(showgrid=False, secondary_y=False)
-            fig_ce.update_yaxes(showgrid=False, secondary_y=True)
-        style_for_ppt(fig_ce)
-        st.plotly_chart(fig_ce, use_container_width=False, config=CAMERA_CFG)
-        add_ppt_download(fig_ce, filename_base="CE & Capacity")
-
-# ---------- DCIR  ----------
-#----------------------------
-with dcir_tab:
+# ----------------------------
+# DCIR
+# ----------------------------
+if view == "DCIR":
     st.subheader("DCIR calculator")
 
-    files_here = sorted(data["__file"].astype(str).unique().tolist())
-    if not files_here:
-        st.info("No NDAX data available for DCIR.")
-    else:
-        left, right = st.columns([1.2, 1])
+    left, right = st.columns([1.2, 1])
+    with left:
+        pulse_length_s = st.number_input("DCIR pulse length [s]", min_value=1.0, value=18.0, step=1.0)
+        soc_mode_label = st.radio(
+            "SOC labelling mode",
+            ["By test design (e.g. 80/50/20/5%)", "Estimate from data (capacity-based)"],
+            index=0,
+        )
+        design_mode = soc_mode_label.startswith("By test")
+        soc_levels_text = st.text_input(
+            "SOC levels (%) in pulse order",
+            value="80, 50, 20, 5",
+            help="Example: 80, 50, 20, 5 with 2 pulses per SOC → 8 pulses total.",
+            disabled=(not design_mode),
+        )
+        pulses_per_soc = st.number_input(
+            "Pulses per SOC level",
+            min_value=1, max_value=10, value=2, step=1,
+            disabled=(not design_mode),
+        )
+        if design_mode:
+            soc_mode = "design"
+            soc_levels = [float(x.strip()) for x in soc_levels_text.split(",") if x.strip()]
+        else:
+            soc_mode = "data"
+            soc_levels = None
 
-        # ---------------- LEFT: inputs ----------------
-        with left:
-            pulse_length_s = st.number_input(
-                "DCIR pulse length [s]",
-                min_value=1.0,
-                value=18.0,
-                step=1.0,
-            )
+        run_btn = st.button("Compute DCIR")
 
-            soc_mode_label = st.radio(
-                "SOC labelling mode",
-                ["By test design (e.g. 80/50/20/5%)", "Estimate from data (capacity-based)"],
-                index=0,
-            )
-
-            # same widgets always visible → no layout jump
-            design_mode = soc_mode_label.startswith("By test")
-            disabled_design = not design_mode
-
-            soc_levels_text = st.text_input(
-                "SOC levels (%) in pulse order",
-                value="80, 50, 20, 5",
-                help="Example: 80, 50, 20, 5 with 2 pulses per SOC → 8 pulses total.",
-                disabled=disabled_design,
-            )
-            pulses_per_soc = st.number_input(
-                "Pulses per SOC level",
-                min_value=1,
-                max_value=10,
-                value=2,
-                step=1,
-                disabled=disabled_design,
-            )
-
-            if design_mode:
-                soc_mode = "design"
-                soc_levels = [
-                    float(x.strip())
-                    for x in soc_levels_text.split(",")
-                    if x.strip()
-                ]
-            else:
-                soc_mode = "data"
-                soc_levels = None  # we ignore pulses_per_soc in data mode
-
-            run_btn = st.button("Compute DCIR")
-
-        # ---------------- RIGHT: explanation ----------------
-        with right:
-            st.markdown(
-                """
+    with right:
+        st.markdown(
+            """
 **How this works :**
 
-- Pre-rest OCV = mean _Voltage_ over last **60 s** of the Rest step.
-- **Instantaneous DCIR** = ΔV/ΔI using an early time window (e.g. 0.5–1.5 s into the pulse).
-- **End-of-pulse DCIR** = ΔV/ΔI using last **5 s** of the pulse.
-- Pulses are detected as non-Rest steps with duration ≈ your pulse length and non-zero current.
-                """
-            )
-
-        # ---------------- RUN COMPUTE ONLY WHEN BUTTON IS PRESSED ----------------
-        if run_btn:
-            all_results = []
-
-            for src in files_here:
-                df_src = data[data["__file"] == src].copy()
-                if df_src.empty:
-                    continue
-
-                try:
-                    res = compute_dcir_for_ndax(
-                        df=df_src,
-                        cell_id=src,
-                        pulse_length_s=pulse_length_s,
-                        soc_mode=soc_mode,
-                        soc_levels=soc_levels,
-                        pulses_per_soc=int(pulses_per_soc),
-                    )
-                except Exception as e:
-                    st.warning(f"Skipping {src} due to error: {e}")
-                    continue
-
-                if res is not None and not res.empty:
-                    all_results.append(res)
-
-            if all_results:
-                dcir_results = pd.concat(all_results, ignore_index=True)
-
-                # ---------- 1) Show raw pulse table ----------
-                st.subheader("DCIR results (raw, one row per pulse)")
-                st.dataframe(dcir_results)
-
-                # ---------- 2) Build summary: SoC columns for inst + 18s ----------
-                dcir_end_col = f"DCIR_{int(round(pulse_length_s))}s_Ohm"
-
-                wide_summary = None
-                if (
-                    "SoC_label" in dcir_results.columns
-                    and dcir_end_col in dcir_results.columns
-                    and "DCIR_inst_Ohm" in dcir_results.columns
-                ):
-                    tmp = dcir_results.copy()
-
-                    # nice SoC strings like "80%"
-                    def soc_fmt(x):
-                        s = str(x)
-                        try:
-                            v = float(s.replace("%", ""))
-                            return f"{v:g}%"
-                        except Exception:
-                            return s
-
-                    tmp["SoC_fmt"] = tmp["SoC_label"].apply(soc_fmt)
-
-                    # melt both metrics into long format
-                    metric_map = {
-                        dcir_end_col: "18s",
-                        "DCIR_inst_Ohm": "inst",
-                    }
-
-                    long = tmp.melt(
-                        id_vars=["Cell_ID", "Pulse_Direction", "SoC_fmt"],
-                        value_vars=list(metric_map.keys()),
-                        var_name="metric",
-                        value_name="DCIR",
-                    )
-                    long["metric_suffix"] = long["metric"].map(metric_map)
-
-                    # column name like "80%_inst" or "80%_18s"
-                    long["column_name"] = long["SoC_fmt"] + "_" + long["metric_suffix"]
-
-                    # pivot to wide: one row per Cell_ID + direction
-                    wide = long.pivot_table(
-                        index=["Cell_ID", "Pulse_Direction"],
-                        columns="column_name",
-                        values="DCIR",
-                        aggfunc="mean",
-                    ).reset_index()
-
-                    value_cols = [
-                        c for c in wide.columns
-                        if c not in ["Cell_ID", "Pulse_Direction"]
-                    ]
-
-                    import math
-
-                    def sort_key(col):
-                        if "_" in col:
-                            soc_part, suffix = col.split("_", 1)
-                        else:
-                            soc_part, suffix = col, ""
-                        try:
-                            soc_num = float(soc_part.replace("%", ""))
-                        except Exception:
-                            soc_num = math.inf
-                        metric_order = {"inst": 0, "18s": 1}
-                        return (metric_order.get(suffix, 2), soc_num)
-
-                    value_cols_sorted = sorted(value_cols, key=sort_key)
-                    wide_summary = wide[["Cell_ID", "Pulse_Direction"] + value_cols_sorted]
-
-                    st.subheader(
-                        f"DCIR summary (instant + {int(round(pulse_length_s))}s, SoC as columns)"
-                    )
-                    st.dataframe(wide_summary)
-                else:
-                    st.info(
-                        "Could not build summary table – missing SoC_label or DCIR columns."
-                    )
-                    wide_summary = None
-
-                # ---------- 3) Excel: raw + summary on one file ----------
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                    dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
-                    if wide_summary is not None:
-                        wide_summary.to_excel(
-                            writer, index=False, sheet_name="DCIR_summary"
-                        )
-
-                output.seek(0)
-                st.download_button(
-                    label="⬇️ Download DCIR tables (Excel)",
-                    data=output,
-                    file_name="dcir_results.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            else:
-                st.info(
-                    "No DCIR pulses detected in the loaded files. "
-                    "Check the pulse length or SOC design inputs."
-                )
-# ---------- ICE Boxplot ----------
-with box_tab: 
-    st.subheader("First-cycle ICE / capacity boxplot")
-
-    # Need cycles to compute CE
-    if "Cycle Index" not in data.columns:
-        st.info("No 'Cycle Index' column found — cannot compute ICE.")
-    else:
-        # Use same CE direction logic as the CE tab
-        # full -> treated as cathode, otherwise anode / cathode as selected
-        ce_cell_type = "cathode" if cell_type_sel == "full" else cell_type_sel
-
-        # --- Build per-family capacity + ICE data using compute_ce() ---
-        grouped = {}
-
-        for src in sorted(data["__file"].astype(str).unique()):
-            sub = data[data["__file"] == src].copy()
-            if sub.empty:
-                continue
-
-            # Group key: always from filename family (so replicates are pooled)
-            fam = family_from_filename(src)
-
-            # Cycle-wise CE / capacities (reuses your central CE logic)
-            ce_df = compute_ce(sub, cell_type=ce_cell_type)
-            if ce_df.empty:
-                continue
-
-            # Pick the *first* cycle with valid capacities (and CE, if possible)
-            ce_df = ce_df.sort_values("cycle")
-            ice_row = None
-            for _, r in ce_df.iterrows():
-                q_chg = r.get("q_chg", np.nan)
-                q_dch = r.get("q_dch", np.nan)
-                if (
-                    pd.notna(q_chg) and pd.notna(q_dch)
-                    and q_chg > 0 and q_dch > 0
-                ):
-                    ice_row = r
-                    break
-
-            if ice_row is None:
-                continue
-
-            max_c = float(ice_row["q_chg"])
-            max_d = float(ice_row["q_dch"])
-            ice = float(ice_row["ce"]) if not pd.isna(ice_row["ce"]) else np.nan
-
-            if not np.isfinite(max_c) or not np.isfinite(max_d):
-                continue
-
-            if fam not in grouped:
-                grouped[fam] = {
-                    "Charge": [],
-                    "Discharge": [],
-                    "ICE": [],
-                }
-
-            grouped[fam]["Charge"].append(max_c)
-            grouped[fam]["Discharge"].append(max_d)
-            if np.isfinite(ice):
-                grouped[fam]["ICE"].append(ice)
-
-        if not grouped:
-            st.info("Could not compute capacities / ICE for any of the selected files.")
-        else:
-            # --- Build tidy tables ---
-            rows = []
-            ce_rows = []
-            for fam, vals in grouped.items():
-                for v in vals["Charge"]:
-                    rows.append({"Group": fam, "Type": "Charge capacity", "Capacity": v})
-                for v in vals["Discharge"]:
-                    rows.append({"Group": fam, "Type": "Discharge capacity", "Capacity": v})
-
-                if vals["ICE"]:
-                    ce_rows.append({
-                        "Group": fam,
-                        "ICE_mean(%)": float(np.mean(vals["ICE"])),
-                        "ICE_std(%)": float(np.std(vals["ICE"])),
-                        "n": len(vals["ICE"]),
-                    })
-
-            plot_data = pd.DataFrame(rows)
-            ce_summary = pd.DataFrame(ce_rows)
-
-            if plot_data.empty:
-                st.info("No capacity data available for boxplot.")
-            else:
-                # Decide label: spec. cap vs total cap (same idea as CE tab)
-                has_spec_cap = (
-                    ("Spec. Cap.(mAh/g)" in data.columns) or
-                    ("DChg. Spec. Cap.(mAh/g)" in data.columns) or
-                    ("Chg. Spec. Cap.(mAh/g)" in data.columns)
-                )
-                y_label = "Specific capacity (mAh/g)" if has_spec_cap else "Capacity"
-
-                # --- Matplotlib boxplot ---
-                plt.style.use("default")
-                fig, ax = plt.subplots(figsize=(6, 4), dpi=150)
-
-                groups = sorted(plot_data["Group"].unique().tolist())
-                positions = np.arange(len(groups)) * 2.0
-
-                y_min_auto = 0.0
-                y_max_auto = float(plot_data["Capacity"].max()) * 1.15
-
-                st.caption(f"Auto y-range: {y_min_auto:.1f} – {y_max_auto:.1f}")
-
-                use_custom_ylim = st.checkbox("Set custom y-axis limits", value=False)
-
-                if use_custom_ylim:
-                    y_min = st.number_input("Y min", value=y_min_auto, step=10.0)
-                    y_max = st.number_input("Y max", value=y_max_auto, step=10.0)
-                else:
-                    y_min, y_max = y_min_auto, y_max_auto
-
-                ax.set_ylim(y_min, y_max)
-
-                for i, fam in enumerate(groups):
-                    gd = plot_data[plot_data["Group"] == fam]
-                    chg = gd[gd["Type"] == "Charge capacity"]["Capacity"]
-                    dchg = gd[gd["Type"] == "Discharge capacity"]["Capacity"]
-
-                    # boxplots
-                    ax.boxplot(
-                        chg,
-                        positions=[positions[i] - 0.4],
-                        widths=0.6,
-                        patch_artist=True,
-                        boxprops=dict(facecolor=NV_COLORDICT["nv_blue2"], color="black"),
-                        medianprops=dict(color="black"),
-                        whiskerprops=dict(color="black"),
-                        capprops=dict(color="black"),
-                    )
-                    ax.boxplot(
-                        dchg,
-                        positions=[positions[i] + 0.4],
-                        widths=0.6,
-                        patch_artist=True,
-                        boxprops=dict(facecolor=NV_COLORDICT["nv_power_green"], color="black"),
-                        medianprops=dict(color="black"),
-                        whiskerprops=dict(color="black"),
-                        capprops=dict(color="black"),
-                    )
-
-                    # jittered points
-                    x_chg = np.random.normal(positions[i] - 0.4, 0.05, size=len(chg))
-                    x_dchg = np.random.normal(positions[i] + 0.4, 0.05, size=len(dchg))
-
-                    ax.scatter(
-                        x_chg,
-                        chg,
-                        alpha=0.6,
-                        color=NV_COLORDICT["nv_blue2"],
-                        edgecolor="black",
-                        linewidth=0.5,
-                        label="Charge capacity" if i == 0 else "",
-                    )
-                    ax.scatter(
-                        x_dchg,
-                        dchg,
-                        alpha=0.6,
-                        color=NV_COLORDICT["nv_power_green"],
-                        edgecolor="black",
-                        linewidth=0.5,
-                        label="Discharge capacity" if i == 0 else "",
-                    )
-
-                    # ICE annotation per group
-                    ice_vals = grouped[fam]["ICE"]
-                    if ice_vals:
-                        ice_mean = np.mean(ice_vals)
-                        ice_std = np.std(ice_vals)
-                        ax.text(
-                            positions[i],
-                            y_max * 0.9,
-                            f"ICE: {ice_mean:.2f} ± {ice_std:.2f}%",
-                            ha="center",
-                            va="center",
-                            fontsize=8,
-                            bbox=dict(facecolor="white", edgecolor="black", alpha=0.9),
-                        )
-
-                ax.set_xticks(positions)
-                ax.set_xticklabels(groups)
-                ax.set_ylabel(y_label)
-                ax.set_title(
-                    f"First-cycle charge / discharge capacity and ICE "
-                    f"({ce_cell_type} CE)"
-                )
-
-                ax.grid(
-                    axis="y",
-                    linestyle="--",
-                    linewidth=0.5,
-                    color=NV_COLORDICT["nv_gray3"],
-                )
-
-                # de-duplicate legend entries
-                handles, labels = ax.get_legend_handles_labels()
-                by_label = dict(zip(labels, handles))
-                ax.legend(by_label.values(), by_label.keys(), loc="lower right")
-
-                st.pyplot(fig, use_container_width=False)
-
-                # --- ICE summary table ---
-                st.subheader("ICE summary per group")
-                if not ce_summary.empty:
-                    st.dataframe(ce_summary)
-                else:
-                    st.caption("_No ICE values could be computed (missing charge/discharge pair)._")
-
-                # --- PNG download ---
-                buf = io.BytesIO()
-                fig.savefig(buf, format="png", dpi=400, bbox_inches="tight")
-                buf.seek(0)
-                st.download_button(
-                    label="⬇️ Download boxplot as PNG (400 dpi)",
-                    data=buf,
-                    file_name="ice_boxplot.png",
-                    mime="image/png",
-                )
-
-                plt.close(fig)
-
-        st.caption(
-            f"CE direction uses the same **Cell type** option as the CE tab "
-            f"(current: **{ce_cell_type}**)."
+- Pre-rest OCV = mean Voltage over last **60 s** of the Rest step.
+- **Instantaneous DCIR** = ΔV/ΔI using early window (0.5–1.5 s into pulse).
+- **End-of-pulse DCIR** = ΔV/ΔI using last **5 s** of pulse.
+- Pulses detected as non-Rest steps with duration ≈ your pulse length and non-zero current.
+            """
         )
 
+    if not run_btn:
+        st.info("Set your options, then click **Compute DCIR**.")
+        st.stop()
+
+    all_results = []
+    for src in selected_files:
+        df = parsed_by_file[src]
+        if df.empty:
+            continue
+        try:
+            res = compute_dcir_for_ndax(
+                df=df, cell_id=src,
+                pulse_length_s=pulse_length_s,
+                soc_mode=soc_mode,
+                soc_levels=soc_levels,
+                pulses_per_soc=int(pulses_per_soc),
+            )
+        except Exception as e:
+            st.warning(f"Skipping {src} due to error: {e}")
+            continue
+        if res is not None and not res.empty:
+            all_results.append(res)
+
+    if not all_results:
+        st.info("No DCIR pulses detected. Check pulse length and inputs.")
+        st.stop()
+
+    dcir_results = pd.concat(all_results, ignore_index=True)
+
+    st.subheader("DCIR results (raw, one row per pulse)")
+    st.dataframe(dcir_results, width="stretch",)
+
+    # summary wide table
+    dcir_end_col = f"DCIR_{int(round(pulse_length_s))}s_Ohm"
+    wide_summary = None
+
+    if "SoC_label" in dcir_results.columns and dcir_end_col in dcir_results.columns and "DCIR_inst_Ohm" in dcir_results.columns:
+        tmp = dcir_results.copy()
+
+        def soc_fmt(x):
+            s = str(x)
+            try:
+                v = float(s.replace("%", ""))
+                return f"{v:g}%"
+            except Exception:
+                return s
+
+        tmp["SoC_fmt"] = tmp["SoC_label"].apply(soc_fmt)
+        metric_map = {dcir_end_col: "18s", "DCIR_inst_Ohm": "inst"}
+
+        long = tmp.melt(
+            id_vars=["Cell_ID", "Pulse_Direction", "SoC_fmt"],
+            value_vars=list(metric_map.keys()),
+            var_name="metric",
+            value_name="DCIR",
+        )
+        long["metric_suffix"] = long["metric"].map(metric_map)
+        long["column_name"] = long["SoC_fmt"] + "_" + long["metric_suffix"]
+
+        wide = long.pivot_table(
+            index=["Cell_ID", "Pulse_Direction"],
+            columns="column_name",
+            values="DCIR",
+            aggfunc="mean",
+        ).reset_index()
+
+        value_cols = [c for c in wide.columns if c not in ["Cell_ID", "Pulse_Direction"]]
+
+        def sort_key(col):
+            if "_" in col:
+                soc_part, suffix = col.split("_", 1)
+            else:
+                soc_part, suffix = col, ""
+            try:
+                soc_num = float(soc_part.replace("%", ""))
+            except Exception:
+                soc_num = math.inf
+            metric_order = {"inst": 0, "18s": 1}
+            return (metric_order.get(suffix, 2), soc_num)
+
+        value_cols_sorted = sorted(value_cols, key=sort_key)
+        wide_summary = wide[["Cell_ID", "Pulse_Direction"] + value_cols_sorted]
+
+        st.subheader(f"DCIR summary (instant + {int(round(pulse_length_s))}s, SoC as columns)")
+        st.dataframe(wide_summary, width="stretch")
+    else:
+        st.info("Could not build summary table (missing SoC_label or DCIR columns).")
+
+    # Excel export
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        dcir_results.to_excel(writer, index=False, sheet_name="DCIR_raw")
+        if wide_summary is not None:
+            wide_summary.to_excel(writer, index=False, sheet_name="DCIR_summary")
+    output.seek(0)
+
+    st.download_button(
+        label="⬇️ Download DCIR tables (Excel)",
+        data=output,
+        file_name="dcir_results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    st.stop()
+
+# ----------------------------
+# ICE Boxplot
+# ----------------------------
+if view == "ICE Boxplot":
+    st.subheader("First-cycle ICE / capacity boxplot")
+
+    ce_cell_type = "cathode" if cell_type_sel == "full" else cell_type_sel
+
+    grouped: Dict[str, Dict[str, List[float]]] = {}
+    for src in selected_files:
+        df = parsed_by_file[src]
+        if "Cycle Index" not in df.columns:
+            continue
+        fam = family_from_filename(src)
+        ce_df = compute_ce(df, cell_type=ce_cell_type)
+        if ce_df.empty:
+            continue
+        ce_df = ce_df.sort_values("cycle")
+        ice_row = None
+        for _, r in ce_df.iterrows():
+            q_chg = r.get("q_chg", np.nan)
+            q_dch = r.get("q_dch", np.nan)
+            if pd.notna(q_chg) and pd.notna(q_dch) and q_chg > 0 and q_dch > 0:
+                ice_row = r
+                break
+        if ice_row is None:
+            continue
+
+        max_c = float(ice_row["q_chg"])
+        max_d = float(ice_row["q_dch"])
+        ice = float(ice_row["ce"]) if not pd.isna(ice_row["ce"]) else np.nan
+
+        if fam not in grouped:
+            grouped[fam] = {"Charge": [], "Discharge": [], "ICE": []}
+        grouped[fam]["Charge"].append(max_c)
+        grouped[fam]["Discharge"].append(max_d)
+        if np.isfinite(ice):
+            grouped[fam]["ICE"].append(ice)
+
+    if not grouped:
+        st.info("Could not compute capacities / ICE for any selected file.")
+        st.stop()
+
+    rows = []
+    ce_rows = []
+    for fam, vals in grouped.items():
+        for v in vals["Charge"]:
+            rows.append({"Group": fam, "Type": "Charge capacity", "Capacity": v})
+        for v in vals["Discharge"]:
+            rows.append({"Group": fam, "Type": "Discharge capacity", "Capacity": v})
+        if vals["ICE"]:
+            ce_rows.append({
+                "Group": fam,
+                "ICE_mean(%)": float(np.mean(vals["ICE"])),
+                "ICE_std(%)": float(np.std(vals["ICE"])),
+                "n": len(vals["ICE"]),
+            })
+
+    plot_data = pd.DataFrame(rows)
+    ce_summary = pd.DataFrame(ce_rows)
+
+    if plot_data.empty:
+        st.info("No capacity data available for boxplot.")
+        st.stop()
+
+    has_spec_cap = any(c in union_cols for c in ["Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)"])
+    y_label = "Specific capacity (mAh/g)" if has_spec_cap else "Capacity"
+
+    fig, ax = plt.subplots(figsize=(6, 4), dpi=150)
+    groups = sorted(plot_data["Group"].unique().tolist())
+    positions = np.arange(len(groups)) * 2.0
+
+    y_min_auto = 0.0
+    y_max_auto = float(plot_data["Capacity"].max()) * 1.15
+    use_custom_ylim = st.checkbox("Set custom y-axis limits", value=False)
+    if use_custom_ylim:
+        y_min = st.number_input("Y min", value=y_min_auto, step=10.0)
+        y_max = st.number_input("Y max", value=y_max_auto, step=10.0)
+    else:
+        y_min, y_max = y_min_auto, y_max_auto
+    ax.set_ylim(y_min, y_max)
+
+    for i, fam in enumerate(groups):
+        gd = plot_data[plot_data["Group"] == fam]
+        chg = gd[gd["Type"] == "Charge capacity"]["Capacity"]
+        dchg = gd[gd["Type"] == "Discharge capacity"]["Capacity"]
+
+        ax.boxplot(
+            chg, positions=[positions[i] - 0.4], widths=0.6, patch_artist=True,
+            boxprops=dict(facecolor=NV_COLORDICT["nv_blue2"], color="black"),
+            medianprops=dict(color="black"),
+            whiskerprops=dict(color="black"),
+            capprops=dict(color="black"),
+        )
+        ax.boxplot(
+            dchg, positions=[positions[i] + 0.4], widths=0.6, patch_artist=True,
+            boxprops=dict(facecolor=NV_COLORDICT["nv_power_green"], color="black"),
+            medianprops=dict(color="black"),
+            whiskerprops=dict(color="black"),
+            capprops=dict(color="black"),
+        )
+
+        x_chg = np.random.normal(positions[i] - 0.4, 0.05, size=len(chg))
+        x_dchg = np.random.normal(positions[i] + 0.4, 0.05, size=len(dchg))
+
+        ax.scatter(
+            x_chg, chg, alpha=0.6, color=NV_COLORDICT["nv_blue2"],
+            edgecolor="black", linewidth=0.5,
+            label="Charge capacity" if i == 0 else "",
+        )
+        ax.scatter(
+            x_dchg, dchg, alpha=0.6, color=NV_COLORDICT["nv_power_green"],
+            edgecolor="black", linewidth=0.5,
+            label="Discharge capacity" if i == 0 else "",
+        )
+
+        ice_vals = grouped[fam]["ICE"]
+        if ice_vals:
+            ice_mean = np.mean(ice_vals)
+            ice_std = np.std(ice_vals)
+            ax.text(
+                positions[i], y_max * 0.9,
+                f"ICE: {ice_mean:.2f} ± {ice_std:.2f}%",
+                ha="center", va="center", fontsize=8,
+                bbox=dict(facecolor="white", edgecolor="black", alpha=0.9),
+            )
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(groups)
+    ax.set_ylabel(y_label)
+    ax.set_title(f"First-cycle charge / discharge capacity and ICE ({ce_cell_type} CE)")
+    ax.grid(axis="y", linestyle="--", linewidth=0.5, color=NV_COLORDICT["nv_gray3"])
+
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys(), loc="lower right")
+
+    st.pyplot(fig, width="content")
+
+    st.subheader("ICE summary per group")
+    if not ce_summary.empty:
+        st.dataframe(ce_summary, width="stretch")
+    else:
+        st.caption("_No ICE values could be computed (missing charge/discharge pair)._")
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=400, bbox_inches="tight")
+    buf.seek(0)
+    st.download_button(
+        label="⬇️ Download boxplot as PNG (400 dpi)",
+        data=buf,
+        file_name="ice_boxplot.png",
+        mime="image/png",
+    )
+    plt.close(fig)
+    st.stop()
+
+# Fallback
 st.success("Loaded. Use the tabs above to explore your NDAX data.")
