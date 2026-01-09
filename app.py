@@ -910,52 +910,53 @@ if view == "XY Builder":
     fig = go.Figure()
     added = False
 
-    for src in selected_files:
-        df = parsed_by_file[src]
-        if x_col not in df.columns:
+for src in selected_files:
+    df = parsed_by_file[src]
+    if x_col not in df.columns:
+        continue
+
+    # always define x_used + df_local
+    x_used = x_col
+    df_local = df
+
+    # If aligning time, create a stitched time axis
+    if align_t0:
+        df_local = df.dropna(subset=[x_col]).copy()
+        df_local["_x"] = build_global_time_seconds(
+            df_local,
+            time_col=x_col,
+            cycle_col="Cycle Index",
+            step_col="Step Type",
+        )
+        x_used = "_x"
+
+    # optional smoothing (per file)
+    if rolling > 1:
+        if x_used in df_local.columns:
+            df_local = df_local.sort_values(x_used)
+        for y in y_cols:
+            if y in df_local.columns:
+                df_local[y] = pd.to_numeric(df_local[y], errors="coerce")
+                df_local[y] = df_local[y].rolling(rolling, min_periods=1).mean()
+
+    for y in y_cols:
+        if y not in df_local.columns or x_used not in df_local.columns:
             continue
 
-        # build x used
-        if align_t0:
-            df_local = df.dropna(subset=[x_col]).copy()
-            df_local["_x"] = build_global_time_seconds(df_local, time_col=x_col, cycle_col="Cycle Index", step_col="Step Type")
-            x_used = "_x"
-        else:
-            df_local = df
+        s = df_local.dropna(subset=[x_used, y])
+        if s.empty:
+            continue
 
-        # optional smoothing (per file)
-        if rolling > 1:
-            df_local = df_local.sort_values(x_used)
-            for y in y_cols:
-                if y in df_local.columns:
-                    df_local[y] = pd.to_numeric(df_local[y], errors="coerce")
-                    df_local[y] = df_local[y].rolling(rolling, min_periods=1).mean()
-
-        for y in y_cols:
-            if y not in df_local.columns:
-                continue
-            s = df_local.dropna(subset=[x_used, y])
-            if s.empty:
-                continue
-
-            if use_global_colors_xy:
-                c = color_for_src(src)
-                fig.add_trace(go.Scatter(
-                    x=s[x_used], y=s[y],
-                    mode="lines",
-                    name=f"{pretty_src(src)} — {y}",
-                    line=dict(color=c, width=line_width),
-                    marker=dict(size=marker_size)
-                ))
-            else:
-                fig.add_trace(go.Scatter(
-                    x=s[x_used], y=s[y],
-                    mode="lines",
-                    name=f"{pretty_src(src)} — {y}",
-                    line=dict(width=line_width),
-                    marker=dict(size=marker_size)
-                ))
-            added = True
+        c = color_for_src(src) if use_global_colors_xy else None
+        fig.add_trace(go.Scatter(
+            x=s[x_used],
+            y=s[y],
+            mode="lines",
+            name=f"{pretty_src(src)} — {y}",
+            line=dict(color=c, width=line_width) if c else dict(width=line_width),
+            marker=dict(size=marker_size),
+        ))
+        added = True
 
     if not added:
         st.warning("No data drawn — check your column choices.")
