@@ -588,6 +588,70 @@ def compute_dcir_for_ndax(
 
     return pd.DataFrame.from_records(records)
 
+def insert_line_breaks_generic(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    *,
+    seg_cycle: bool = False,
+    seg_step: bool = False,
+    seg_cap_reset: bool = False,
+    seg_current_flip: bool = False,
+    cap_col_name: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Insert NaN rows in x/y to force Plotly line breaks.
+    """
+    if df.empty or x_col not in df.columns or y_col not in df.columns:
+        return df
+
+    d = df.loc[:, ~pd.Index(df.columns).duplicated()].reset_index(drop=True).copy()
+    break_pos: List[int] = []
+    n = len(d)
+
+    # 1) Cycle changes
+    if seg_cycle and "Cycle Index" in d.columns:
+        cyc = d["Cycle Index"].to_numpy()
+        for i in range(n - 1):
+            if pd.notna(cyc[i]) and pd.notna(cyc[i + 1]) and cyc[i + 1] != cyc[i]:
+                break_pos.append(i)
+
+    # 2) Step changes
+    if seg_step and "Step Type" in d.columns:
+        stp = d["Step Type"].astype(str)
+        for i in range(n - 1):
+            if stp.iloc[i + 1] != stp.iloc[i]:
+                break_pos.append(i)
+
+    # 3) Capacity resets (only if we have a usable capacity column)
+    if seg_cap_reset and isinstance(cap_col_name, str) and cap_col_name in d.columns:
+        cap = pd.to_numeric(d[cap_col_name], errors="coerce").fillna(0.0)
+        idxs = cap[(cap.shift(-1) == 0) & (cap > 0)].index.tolist()
+        break_pos.extend(idxs)
+
+    # 4) Current sign flips (very good for separating chg/dchg if Step Type is messy)
+    if seg_current_flip and "Current(mA)" in d.columns:
+        cur = pd.to_numeric(d["Current(mA)"], errors="coerce")
+        sgn = np.sign(cur)
+        for i in range(n - 1):
+            a, b = sgn.iloc[i], sgn.iloc[i + 1]
+            if pd.notna(a) and pd.notna(b) and a != 0 and b != 0 and a != b:
+                break_pos.append(i)
+
+    if not break_pos:
+        return d
+
+    pieces = []
+    last = 0
+    for idx in sorted(set(break_pos)):
+        pieces.append(d.iloc[last:idx + 1])
+        nan_row = {c: (np.nan if c in [x_col, y_col] else d.iloc[idx].get(c)) for c in d.columns}
+        pieces.append(pd.DataFrame([nan_row]))
+        last = idx + 1
+    pieces.append(d.iloc[last:])
+
+    return _concat_nonempty(pieces)
+
 
 # ----------------------------
 # NDAX loader (bytes-based cache)
@@ -916,6 +980,12 @@ if view == "XY Builder":
     fig = go.Figure()
     added = False
 
+    CAP_LIKE = {
+    "Spec. Cap.(mAh/g)", "Capacity(mAh)",
+    "Chg. Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)",
+    "Chg. Cap.(mAh)", "DChg. Cap.(mAh)",
+    }
+
     for src in selected_files:
         df = parsed_by_file[src]
         if x_col not in df.columns:
@@ -951,10 +1021,38 @@ if view == "XY Builder":
             if y not in df_local.columns or x_used not in df_local.columns:
                 continue
 
-            s = df_local.dropna(subset=[x_used, y])
-            if s.empty:
-                continue
+            # Build a small frame with the extra columns needed for segmentation
+            cols_needed = [x_used, y]
+            for extra in ["Cycle Index", "Step Type", "Current(mA)"]:
+                if extra in df_local.columns and extra not in cols_needed:
+                    cols_needed.append(extra)
 
+            df_plot = df_local[cols_needed].copy()
+
+            # Insert breaks for V–Q / specQ plots (and generally whenever Step/Cycle exists)
+            use_breaks = (not align_t0) and (
+                (x_col in CAP_LIKE) or
+                ("Step Type" in df_plot.columns) or
+                ("Cycle Index" in df_plot.columns)
+            )
+
+            if use_breaks:
+                df_plot = insert_line_breaks_generic(
+                    df_plot,
+                    x_col=x_used,
+                    y_col=y,
+                    seg_cycle=("Cycle Index" in df_plot.columns),
+                    seg_step=("Step Type" in df_plot.columns),
+                    seg_cap_reset=(x_col in CAP_LIKE),          # only when X is capacity-like
+                    cap_col_name=(x_used if x_col in CAP_LIKE else None),
+                    seg_current_flip=("Current(mA)" in df_plot.columns),
+                )
+
+            # Keep NaNs (they are the line breaks), but skip truly empty series
+            if df_plot.dropna(subset=[x_used, y]).empty:
+                continue
+            s = df_plot
+            
             c = color_for_src(src) if use_global_colors_xy else None
             fig.add_trace(go.Scatter(
                 x=s[x_used],
