@@ -1,16 +1,4 @@
 
-# app_optimized.py
-# ------------------------------------------------------------
-# Battery Cell Data — Visualizer (Optimized)
-# Key improvements vs. original:
-# - Upload + parse gated behind a form submit button (prevents N*(N+1)/2 re-parses)
-# - Stable caching keyed on (filename + bytes md5) instead of Streamlit UploadedFile object
-# - Temp files are deleted after parse (no disk creep)
-# - Avoids giant "raw" concatenations unless needed; plots iterate per-file
-# - Avoids executing all tabs on every rerun by using a sidebar "View" selector (lazy execution)
-# - Fixes selected_sources overwrite bug
-# ------------------------------------------------------------
-
 import re
 import io
 import os
