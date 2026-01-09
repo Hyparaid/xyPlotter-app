@@ -884,7 +884,7 @@ view = st.segmented_control(
 # ----------------------------
 if view == "Raw File Preview":
     st.subheader("Preview parsed data (first rows per file)")
-    max_rows = st.number_input("Rows per file", min_value=5, max_value=1000, value=900, step=50)
+    max_rows = st.number_input("Rows per file", min_value=5, max_value=10000, value=900, step=50)
     for f in selected_files:
         df = parsed_by_file[f]
         am = None
@@ -1052,7 +1052,7 @@ if view == "XY Builder":
             if df_plot.dropna(subset=[x_used, y]).empty:
                 continue
             s = df_plot
-            
+
             c = color_for_src(src) if use_global_colors_xy else None
             fig.add_trace(go.Scatter(
                 x=s[x_used],
