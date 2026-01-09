@@ -731,7 +731,7 @@ with st.sidebar.form("upload_form", clear_on_submit=False):
         type=["ndax"],
         accept_multiple_files=True,
     )
-    parse_now = st.form_submit_button("🚀 launch files")
+    parse_now = st.form_submit_button("🚀 **launch files**")
 
 # Provide an easy way to clear state
 top_l, top_r = st.columns([6, 1])
@@ -763,7 +763,7 @@ if parse_now:
     st.session_state["uploaded_names_cache"] = sorted(list(parsed.keys()))
 
 if "parsed_by_file" not in st.session_state:
-    st.info("Upload your files, then click **launch files**.")
+    st.info("Upload your files, then click 🚀 **launch files**.")
     st.stop()
 
 parsed_by_file: Dict[str, pd.DataFrame] = st.session_state["parsed_by_file"]
