@@ -844,6 +844,7 @@ if view == "XY Builder":
     st.subheader("Free-form XY plot builder")
 
     all_cols = [c for c in union_cols if c not in ["__file", "__family"]]
+
     # numeric columns = numeric in at least one selected frame
     numeric_cols = []
     for c in all_cols:
@@ -868,7 +869,9 @@ if view == "XY Builder":
             "X axis",
             all_cols,
             index=(all_cols.index(st.session_state.xy_x) if st.session_state.xy_x in all_cols else 0),
+            key="xy_x_select",
         )
+
     is_time_x = (x_col == G.get("time"))
     align_t0 = is_time_x
     if is_time_x:
@@ -879,26 +882,29 @@ if view == "XY Builder":
             "Y axis (one or more)",
             numeric_cols,
             default=[y for y in st.session_state.xy_y if y in numeric_cols] or (numeric_cols[:1] if numeric_cols else []),
+            key="xy_y_multi",
         )
+
     with row1[2]:
-        rolling = st.number_input("Rolling mean window (pts)", 1, 9999, 1, 1)
+        rolling = st.number_input("Rolling mean window (pts)", 1, 9999, 1, 1, key="xy_roll")
         use_global_colors_xy = st.checkbox(
             "Use global colors here",
             value=True,
             help="If off, Plotly default color cycle is used.",
+            key="xy_use_global_colors",
         )
 
     row2 = st.columns([1, 1, 0.6])
     with row2[0]:
-        y_min = st.text_input("Y min (blank=auto)", "")
+        y_min = st.text_input("Y min (blank=auto)", "", key="xy_ymin")
     with row2[1]:
-        y_max = st.text_input("Y max (blank=auto)", "")
+        y_max = st.text_input("Y max (blank=auto)", "", key="xy_ymax")
 
     row3 = st.columns([1, 1, 0.6])
     with row3[0]:
-        x_min = st.text_input("X min (blank=auto)", "")
+        x_min = st.text_input("X min (blank=auto)", "", key="xy_xmin")
     with row3[1]:
-        x_max = st.text_input("X max (blank=auto)", "")
+        x_max = st.text_input("X max (blank=auto)", "", key="xy_xmax")
 
     st.session_state.xy_x = x_col
     st.session_state.xy_y = y_cols
@@ -910,75 +916,86 @@ if view == "XY Builder":
     fig = go.Figure()
     added = False
 
-for src in selected_files:
-    df = parsed_by_file[src]
-    if x_col not in df.columns:
-        continue
+    for src in selected_files:
+        df = parsed_by_file[src]
+        if x_col not in df.columns:
+            continue
 
-    # always define x_used + df_local
-    x_used = x_col
-    df_local = df
+        # always define x_used + df_local
+        x_used = x_col
+        df_local = df
 
-    # If aligning time, create a stitched time axis
-    if align_t0:
-        df_local = df.dropna(subset=[x_col]).copy()
-        df_local["_x"] = build_global_time_seconds(
-            df_local,
-            time_col=x_col,
-            cycle_col="Cycle Index",
-            step_col="Step Type",
-        )
-        x_used = "_x"
+        # If aligning time, create a stitched time axis
+        if align_t0:
+            df_local = df_local.dropna(subset=[x_col]).copy()
+            df_local["_x"] = build_global_time_seconds(
+                df_local,
+                time_col=x_col,
+                cycle_col="Cycle Index",
+                step_col="Step Type",
+            )
+            x_used = "_x"
 
-    # optional smoothing (per file)
-    if rolling > 1:
-        if x_used in df_local.columns:
-            df_local = df_local.sort_values(x_used)
+        # optional smoothing (per file)
+        if rolling > 1:
+            try:
+                df_local = df_local.sort_values(x_used)
+            except Exception:
+                pass
+            for y in y_cols:
+                if y in df_local.columns:
+                    df_local[y] = pd.to_numeric(df_local[y], errors="coerce")
+                    df_local[y] = df_local[y].rolling(rolling, min_periods=1).mean()
+
         for y in y_cols:
-            if y in df_local.columns:
-                df_local[y] = pd.to_numeric(df_local[y], errors="coerce")
-                df_local[y] = df_local[y].rolling(rolling, min_periods=1).mean()
+            if y not in df_local.columns or x_used not in df_local.columns:
+                continue
 
-    for y in y_cols:
-        if y not in df_local.columns or x_used not in df_local.columns:
-            continue
+            s = df_local.dropna(subset=[x_used, y])
+            if s.empty:
+                continue
 
-        s = df_local.dropna(subset=[x_used, y])
-        if s.empty:
-            continue
-
-        c = color_for_src(src) if use_global_colors_xy else None
-        fig.add_trace(go.Scatter(
-            x=s[x_used],
-            y=s[y],
-            mode="lines",
-            name=f"{pretty_src(src)} — {y}",
-            line=dict(color=c, width=line_width) if c else dict(width=line_width),
-            marker=dict(size=marker_size),
-        ))
-        added = True
+            c = color_for_src(src) if use_global_colors_xy else None
+            fig.add_trace(go.Scatter(
+                x=s[x_used],
+                y=s[y],
+                mode=("lines+markers" if show_markers else "lines"),
+                name=f"{pretty_src(src)} — {y}",
+                line=dict(color=c, width=line_width) if c else dict(width=line_width),
+                marker=dict(size=marker_size),
+            ))
+            added = True
 
     if not added:
-        st.warning("No data drawn — check your column choices.")
-    else:
-        try:
-            if x_min != "":
-                fig.update_xaxes(range=[float(x_min), float(x_max) if x_max != "" else None])
-        except Exception:
-            pass
-        try:
-            if y_min != "":
-                fig.update_yaxes(range=[float(y_min), float(y_max) if y_max != "" else None])
-        except Exception:
-            pass
+        st.warning("No data drawn — check your column choices (some files may not contain those columns).")
+        st.stop()
 
-        fig.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
-        if show_grid_global:
-            fig.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-            fig.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+    # axis ranges (only if user typed something + it’s numeric)
+    try:
+        if x_min != "" or x_max != "":
+            lo = float(x_min) if x_min != "" else None
+            hi = float(x_max) if x_max != "" else None
+            fig.update_xaxes(range=[lo, hi])
+    except Exception:
+        pass
 
-        st.plotly_chart(fig, width="stretch", config=CAMERA_CFG)
+    try:
+        if y_min != "" or y_max != "":
+            lo = float(y_min) if y_min != "" else None
+            hi = float(y_max) if y_max != "" else None
+            fig.update_yaxes(range=[lo, hi])
+    except Exception:
+        pass
 
+    fig.update_layout(
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    if show_grid_global:
+        fig.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+        fig.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+
+    st.plotly_chart(fig, width="stretch", config=CAMERA_CFG)
     st.stop()
 
 # ----------------------------
