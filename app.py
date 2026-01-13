@@ -2,12 +2,14 @@
 import re
 import io
 import os
+import json
+import textwrap
 import math
 import hashlib
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
+from streamlit_theme import st_theme
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -48,7 +50,22 @@ st.set_page_config(
 )
 
 HERE = Path(__file__).parent
-LOGO_PATH = HERE / "logo.png"
+
+_theme = st_theme(key="__theme") 
+_theme_base = (_theme or {}).get("base")
+
+# Fallback if theme is briefly None on first render
+if _theme_base not in ("light", "dark"):
+    _theme_base = st.get_option("theme.base") or "light"
+
+IS_DARK = (_theme_base == "dark")
+
+# ----------------------------
+# Demo / portfolio mode
+# ----------------------------
+DEMO_DIR = HERE / "demo_data"
+DEMO_MANIFEST = DEMO_DIR / "manifest.json"
+
 
 # ----------------------------
 # Styling / colors
@@ -166,19 +183,69 @@ def style_for_ppt(fig):
         tickfont=dict(family="Arial", size=14, color="black"),
     )
 
-def add_ppt_download(fig, filename_base: str):
+def apply_plotly_theme(fig, *, dark: bool):
+    fg = "white" if dark else "black"
+    grid = "rgba(255,255,255,0.18)" if dark else NV_COLORDICT["nv_gray3"]
+    paper = "rgba(0,0,0,0)"  # transparent so Streamlit theme shows through
+
+    fig.update_layout(
+        template="plotly_dark" if dark else "plotly_white",
+        paper_bgcolor=paper,
+        plot_bgcolor=paper,
+        font=dict(color=fg),
+        legend=dict(
+            font=dict(color=fg),
+            bordercolor=fg,
+            bgcolor="rgba(0,0,0,0.25)" if dark else "rgba(255,255,255,0.9)",
+        ),
+    )
+    fig.update_xaxes(
+        color=fg,
+        title_font=dict(color=fg),
+        tickfont=dict(color=fg),
+        showline=True,
+        linecolor=fg,
+        gridcolor=grid,
+        zerolinecolor=grid,
+    )
+    fig.update_yaxes(
+        color=fg,
+        title_font=dict(color=fg),
+        tickfont=dict(color=fg),
+        showline=True,
+        linecolor=fg,
+        gridcolor=grid,
+        zerolinecolor=grid,
+    )
+
+def add_ppt_download(fig, filename_base: str, key: str | None = None):
     buf = io.BytesIO()
+
     try:
-        fig.write_image(buf, format="png", width=1600, height=900, scale=2)
+        # Make a copy so we don't change the on-screen figure
+        fig_ppt = go.Figure(fig)
+
+        # Force a clean light style for PPT export
+        apply_plotly_theme(fig_ppt, dark=False)
+
+        fig_ppt.write_image(
+            buf,
+            format="png",
+            width=1600,
+            height=900,
+            scale=2,
+        )
     except Exception:
         st.info("Static image export not available. Install `kaleido` to enable PNG downloads.")
         return
+
     buf.seek(0)
     st.download_button(
         label="⬇️ Download PNG for PPT",
         data=buf,
         file_name=f"{filename_base}.png",
         mime="image/png",
+        key=key or f"dl_{filename_base}",
     )
 
 def pretty_src(src: str) -> str:
@@ -709,18 +776,291 @@ def load_ndax_bytes(filename: str, file_bytes: bytes, file_md5: str) -> pd.DataF
                 pass
 
 
+
+# ----------------------------
+# Demo dataset utilities
+# ----------------------------
+def _safe_demo_name(src: str, idx: int) -> str:
+    """Generate a stable, non-identifying display name from a source string."""
+    s = Path(str(src)).stem
+    s_low = s.lower()
+    if "ref" in s_low:
+        group = "Ref"
+    elif "7" in s_low:
+        group = "7pct"
+    else:
+        group = "Sample"
+    return f"Demo_{group}_{idx+1}"
+
+def _downsample_light(df: pd.DataFrame, max_rows: int = 60000) -> pd.DataFrame:
+    """Downsample large frames while keeping step boundaries."""
+    if df is None or df.empty or len(df) <= max_rows:
+        return df
+    d = df.reset_index(drop=True)
+    if "Step_Index" in d.columns:
+        pieces = []
+        for _, g in d.groupby("Step_Index", sort=False):
+            n = len(g)
+            if n <= 2000:
+                pieces.append(g)
+            else:
+                # keep endpoints + uniform sampling
+                keep_idx = np.unique(np.concatenate([
+                    np.array([0, n-1]),
+                    np.linspace(0, n-1, 2000).astype(int)
+                ]))
+                pieces.append(g.iloc[keep_idx])
+        d2 = _concat_nonempty(pieces).reset_index(drop=True)
+        if len(d2) <= max_rows:
+            return d2
+        # if still too big, fall back to uniform sample
+        keep_idx = np.linspace(0, len(d2)-1, max_rows).astype(int)
+        return d2.iloc[keep_idx].reset_index(drop=True)
+    # no step index: uniform
+    keep_idx = np.linspace(0, len(d)-1, max_rows).astype(int)
+    return d.iloc[keep_idx].reset_index(drop=True)
+
+def _hybrid_anonymize_df(df: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
+    """
+    Hybrid anonymization:
+    - drops timestamp-like columns
+    - lightly rescales time/capacity to reduce identifiability
+    - downsamples for lightweight demo
+    """
+    if df is None or df.empty:
+        return df
+
+    rng = np.random.default_rng(seed)
+    d = df.copy()
+
+    # Drop timestamp-like columns (keep relative 'Time' / 'Total Time')
+    drop_cols = [c for c in d.columns if c in [
+        "Timestamp", "Record Time", "DateTime", "Date Time", "System Time", "Local Time"
+    ]]
+    if drop_cols:
+        d = d.drop(columns=drop_cols, errors="ignore")
+
+    # Light rescale (keeps shapes but hides exact numbers)
+    # Time
+    for tc in ["Time"]:
+        if tc in d.columns:
+            s = pd.to_numeric(d[tc], errors="coerce")
+            if s.notna().any():
+                scale = float(rng.uniform(0.85, 1.15))
+                d[tc] = s * scale
+
+    # Capacity-like columns
+    cap_cols = [
+        "Spec. Cap.(mAh/g)", "Capacity(mAh)",
+        "Chg. Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)",
+        "Chg. Cap.(mAh)", "DChg. Cap.(mAh)",
+        "Charge_Capacity(mAh)", "Discharge_Capacity(mAh)",
+    ]
+    cap_scale = float(rng.uniform(0.85, 1.15))
+    for cc in cap_cols:
+        if cc in d.columns:
+            s = pd.to_numeric(d[cc], errors="coerce")
+            if s.notna().any():
+                d[cc] = s * cap_scale
+
+    # Voltage tiny shift (optional, very small)
+    if "Voltage(V)" in d.columns:
+        v = pd.to_numeric(d["Voltage(V)"], errors="coerce")
+        if v.notna().any():
+            d["Voltage(V)"] = v + float(rng.uniform(-0.01, 0.01))
+
+    return _downsample_light(d)
+
+@st.cache_data(show_spinner=False)
+def load_demo_frames() -> Dict[str, pd.DataFrame]:
+    """
+    Load demo frames.
+    Priority:
+      1) demo_data/manifest.json + demo csv.gz files (created by the 'Create demo pack' tool)
+      2) built-in synthetic dataset (always available)
+    """
+    if DEMO_MANIFEST.exists():
+        try:
+            manifest = json.loads(DEMO_MANIFEST.read_text(encoding="utf-8"))
+            parsed: Dict[str, pd.DataFrame] = {}
+            for item in manifest.get("files", []):
+                rel = item.get("path")
+                disp = item.get("name")
+                if not rel or not disp:
+                    continue
+                p = DEMO_DIR / rel
+                if not p.exists():
+                    continue
+                df = pd.read_csv(p, compression="gzip")
+                df = normalize_neware_headers(df)
+                df = infer_rest_step(df)
+                df["__file"] = disp
+                df["__family"] = family_from_filename(disp)
+                # restore attrs if present
+                am = item.get("active_mass_g")
+                if isinstance(am, (int, float)) and am > 0:
+                    df.attrs["active_mass_g"] = float(am)
+                parsed[disp] = df
+            if parsed:
+                return parsed
+        except Exception:
+            # fall back to synthetic
+            pass
+
+    # ----------------------------
+    # Synthetic demo (no external files needed)
+    # ----------------------------
+    rng = np.random.default_rng(42)
+    demo: Dict[str, pd.DataFrame] = {}
+
+    def make_profile(n, kind="charge"):
+        x = np.linspace(0, 1, n)
+        if kind == "charge":
+            # S-shaped rise
+            return 0.05 + 0.95 * (1/(1+np.exp(-8*(x-0.35))))
+        else:
+            return 0.05 + 0.95 * (1 - 1/(1+np.exp(-8*(x-0.35))))
+
+    def step_df(step_idx, cycle, step_type, duration_s, npts, current_mA, q_spec_end, am_g, v_kind):
+        t = np.linspace(0, duration_s, npts)
+        v = make_profile(npts, kind=v_kind)
+        # add light noise
+        #v = v + rng.normal(0, 0.003, size=npts)
+        q_spec = np.linspace(0, q_spec_end, npts)
+        q_mAh = q_spec * am_g
+
+        row = {
+            "Step_Index": np.full(npts, step_idx, dtype=int),
+            "Cycle Index": np.full(npts, cycle, dtype=int),
+            "Step Type": np.full(npts, step_type),
+            "Time": t,
+            "Voltage(V)": v,
+            "Current(mA)": np.full(npts, current_mA),
+            "Spec. Cap.(mAh/g)": q_spec,
+            "Capacity(mAh)": q_mAh,
+            "Charge_Capacity(mAh)": np.where(current_mA > 0, q_mAh, 0.0),
+            "Discharge_Capacity(mAh)": np.where(current_mA < 0, q_mAh, 0.0),
+            "Chg. Spec. Cap.(mAh/g)": np.where(current_mA > 0, q_spec, np.nan),
+            "DChg. Spec. Cap.(mAh/g)": np.where(current_mA < 0, q_spec, np.nan),
+            "Chg. Cap.(mAh)": np.where(current_mA > 0, q_mAh, np.nan),
+            "DChg. Cap.(mAh)": np.where(current_mA < 0, q_mAh, np.nan),
+        }
+        return pd.DataFrame(row)
+
+    def rest_df(step_idx, cycle, duration_s, npts, v_level):
+        t = np.linspace(0, duration_s, npts)
+        v = np.full(npts, v_level) + rng.normal(0, 0.0015, size=npts)
+        row = {
+            "Step_Index": np.full(npts, step_idx, dtype=int),
+            "Cycle Index": np.full(npts, cycle, dtype=int),
+            "Step Type": np.full(npts, "Rest"),
+            "Time": t,
+            "Voltage(V)": v,
+            "Current(mA)": np.zeros(npts),
+            "Spec. Cap.(mAh/g)": np.zeros(npts),
+            "Capacity(mAh)": np.zeros(npts),
+            "Charge_Capacity(mAh)": np.zeros(npts),
+            "Discharge_Capacity(mAh)": np.zeros(npts),
+            "Chg. Spec. Cap.(mAh/g)": np.nan,
+            "DChg. Spec. Cap.(mAh/g)": np.nan,
+            "Chg. Cap.(mAh)": np.nan,
+            "DChg. Cap.(mAh)": np.nan,
+        }
+        return pd.DataFrame(row)
+
+    def pulse_df(step_idx, cycle, duration_s, npts, current_mA, v_pre, dv):
+        t = np.linspace(0, duration_s, npts)
+        # exponential response for DCIR
+        v = v_pre + dv * (1 - np.exp(-t/2.5))
+        v = v + rng.normal(0, 0.0015, size=npts)
+        row = {
+            "Step_Index": np.full(npts, step_idx, dtype=int),
+            "Cycle Index": np.full(npts, cycle, dtype=int),
+            "Step Type": np.full(npts, "Pulse"),
+            "Time": t,
+            "Voltage(V)": v,
+            "Current(mA)": np.full(npts, current_mA),
+            "Spec. Cap.(mAh/g)": np.zeros(npts),
+            "Capacity(mAh)": np.zeros(npts),
+            "Charge_Capacity(mAh)": np.zeros(npts),
+            "Discharge_Capacity(mAh)": np.zeros(npts),
+            "Chg. Spec. Cap.(mAh/g)": np.nan,
+            "DChg. Spec. Cap.(mAh/g)": np.nan,
+            "Chg. Cap.(mAh)": np.nan,
+            "DChg. Cap.(mAh)": np.nan,
+        }
+        return pd.DataFrame(row)
+
+    # Build 4 demo files
+    specs = [
+        ("Demo-7pct_1", 980, 920),
+        ("Demo-7pct_2", 960, 905),
+        ("Demo-Ref_1", 780, 750),
+        ("Demo-Ref_2", 790, 760),
+    ]
+    for i, (name, qchg1, qdch1) in enumerate(specs):
+        am_g = float(rng.uniform(0.006, 0.015))  # fake active mass
+        frames = []
+        step_idx = 1
+
+        # 10 cycles of simple chg/dchg
+        for cyc in range(1, 11):
+            # fade slightly over cycles
+            fade = 1.0 - 0.015 * (cyc - 1)
+            qchg = qchg1 * fade * float(rng.uniform(0.98, 1.02))
+            qdch = qdch1 * fade * float(rng.uniform(0.98, 1.02))
+
+            frames.append(step_df(step_idx, cyc, "CC Chg", 1800, 350, +100.0, qchg, am_g, "charge")); step_idx += 1
+            frames.append(rest_df(step_idx, cyc, 600, 80, 1.0)); step_idx += 1
+            frames.append(step_df(step_idx, cyc, "CC DChg", 1800, 350, -100.0, qdch, am_g, "discharge")); step_idx += 1
+            frames.append(rest_df(step_idx, cyc, 600, 80, 0.05)); step_idx += 1
+
+        # add a DCIR pulse block at cycle 11
+        cyc = 11
+        soc_levels = [80, 50, 20, 5]
+        for soc in soc_levels:
+            # two pulses per SOC with rests
+            for _ in range(2):
+                v_pre = 0.2 + 0.0075 * soc  # higher SOC higher OCV
+                frames.append(rest_df(step_idx, cyc, 120, 60, v_pre)); step_idx += 1
+                # discharge pulse: negative current, voltage drops
+                frames.append(pulse_df(step_idx, cyc, 18, 60, -500.0, v_pre, dv=-0.06)); step_idx += 1
+
+        d = _concat_nonempty(frames)
+        d = normalize_neware_headers(d)
+        d = infer_rest_step(d)
+        d["__file"] = name
+        d["__family"] = family_from_filename(name)
+        d.attrs["active_mass_g"] = am_g
+        demo[name] = d.reset_index(drop=True)
+
+    return demo
+
+def _activate_demo():
+    demo = load_demo_frames()
+    st.session_state["parsed_by_file"] = demo
+    st.session_state["uploaded_names_cache"] = sorted(list(demo.keys()))
+    st.session_state["demo_loaded"] = True
+
+
 # ----------------------------
 # Header / logo
 # ----------------------------
+LOGO_LIGHT_PATH = HERE / "logo_light.png"
+LOGO_DARK_PATH  = HERE / "logo_dark.png"
+
+logo_path = LOGO_DARK_PATH if IS_DARK else LOGO_LIGHT_PATH
+
 c1, c2, c3 = st.columns([1, 1, 1])
 with c2:
-    if LOGO_PATH.exists():
-        st.image(str(LOGO_PATH))
+    if logo_path.exists():
+        st.image(str(logo_path))
     else:
-        st.caption(f"Logo missing: {LOGO_PATH.name}")
+        st.caption(f"Logo missing: {logo_path.name}")
 
 st.title("🔋 BATTERY CELL DATA — VISUALIZER 📈")
-st.caption("Built by the Preli team")
+st.caption("::::::: Built by the Preli team ::::::::")
+
 
 # ----------------------------
 # Sidebar: upload + parse (GATED)
@@ -738,12 +1078,35 @@ top_l, top_r = st.columns([6, 1])
 with top_r:
     if "parsed_by_file" in st.session_state:
         if st.button("🧹 Reset", key="clear_parsed_main"):
-            for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files"]:
+            for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files","demo_loaded"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
+if st.session_state.get("demo_loaded", False):
+        st.info("**Demo dataset loaded.** You can still upload your own `.ndax` files from the sidebar to analyze real data.")
+
 if not uploaded_files and "parsed_by_file" not in st.session_state:
-    st.info("Upload one or more NDAX files and press 🚀 launch.")
+    row_l, row_r = st.columns([6, 2])
+
+    with row_l:
+        st.info("Upload one or more NDAX files and press 🚀 launch or simply explore the app with a demo dataset.")
+
+    with row_r:
+        st.markdown("""
+            <style>
+            div.stButton > button {
+            background: #0f5280;
+            color: white;
+            border-radius: 999px;
+            padding: 0.5rem 1rem;
+            border: 0;
+            font-weight: 700;
+            }
+            div.stButton > button:hover { opacity: 0.9; }
+            </style>
+            """, unsafe_allow_html=True)
+        if st.button(" ▶️ Explore demo", type="primary", key="load_demo_main"):
+            _activate_demo(); st.rerun()
     st.stop()
 
 # Parse only when user clicks, or use existing parsed data
@@ -761,6 +1124,7 @@ if parse_now:
     st.sidebar.success(f"Parsed {len(parsed)} file(s).")
     st.session_state["parsed_by_file"] = parsed
     st.session_state["uploaded_names_cache"] = sorted(list(parsed.keys()))
+    st.session_state["demo_loaded"] = False
 
 if "parsed_by_file" not in st.session_state:
     st.info("Upload your files, then click 🚀 **launch files**.")
@@ -777,6 +1141,7 @@ if current_upload_names and set(current_upload_names) != set(cached_names) and n
 # ----------------------------
 # Sidebar: options
 # ----------------------------
+
 with st.sidebar.expander("CE options", expanded=True):
     cell_type_sel = st.radio(
         "Cell type (for CE direction)",
@@ -822,6 +1187,7 @@ selected_files = [f for f, on in st.session_state["file_checks"].items() if on]
 if not selected_files:
     st.info("Select at least one file in the sidebar to plot.")
     st.stop()
+
 # ----------------------------
 # Color mode (global)
 # ----------------------------
@@ -1146,7 +1512,7 @@ if view == "Voltage–Time":
 
     style_for_ppt(fig_vt)
     st.plotly_chart(fig_vt, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_vt, filename_base="voltage_time")
+    add_ppt_download(fig_vt, filename_base="voltage_time", key="plot_voltage_time")  
     st.stop()
 
 # ----------------------------
@@ -1230,9 +1596,9 @@ if view == "Voltage–Capacity":
         fig_vq.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         fig_vq.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-    style_for_ppt(fig_vq)
+    apply_plotly_theme(fig_vq, dark=IS_DARK)   # <-- on-screen adapts to Streamlit theme
     st.plotly_chart(fig_vq, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_vq, filename_base="voltage_capacity")
+    add_ppt_download(fig_vq, filename_base="voltage_capacity",key="plot_voltage_capacity")  # <-- exports light copy
     st.stop()
 
 # ----------------------------
@@ -1285,9 +1651,9 @@ if view == "Capacity vs Cycle":
     fig_cap.update_xaxes(title_text="Cycle", showgrid=show_grid_global, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
     fig_cap.update_yaxes(title_text=y_label, showgrid=show_grid_global, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-    style_for_ppt(fig_cap)
+    apply_plotly_theme(fig_cap, dark=IS_DARK)   # <-- on-screen adapts to Streamlit theme
     st.plotly_chart(fig_cap, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_cap, filename_base="capacity_vs_cycle")
+    add_ppt_download(fig_cap, filename_base="capacity_vs_cycle", key="plot_capacity_vs_cycle")  # <-- exports light copy
     st.stop()
 
 # ----------------------------
@@ -1361,9 +1727,9 @@ if view == "Capacity & CE":
         fig_ce.update_yaxes(showgrid=False, secondary_y=False)
         fig_ce.update_yaxes(showgrid=False, secondary_y=True)
 
-    style_for_ppt(fig_ce)
+    apply_plotly_theme(fig_ce, dark=IS_DARK)   # <-- on-screen adapts to Streamlit theme
     st.plotly_chart(fig_ce, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_ce, filename_base="ce_and_capacity")
+    add_ppt_download(fig_ce, filename_base="ce_and_capacity", key="plot_ce_and_capacity")  # <-- exports light copy
     st.stop()
 
 # ----------------------------
