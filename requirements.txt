@@ -7,5 +7,5 @@ pillow==10.2
 kaleido==0.2.1
 XlsxWriter==3.2.0
 matplotlib==3.10.7
-streamlittheme==0.3.2
+streamlit-theme==0.3.1
 textwrap3==0.10.0
