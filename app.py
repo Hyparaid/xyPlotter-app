@@ -340,6 +340,20 @@ def build_global_time_seconds(
 ) -> pd.Series:
     d = df
 
+    def _to_seconds(s: pd.Series) -> pd.Series:
+        # 1) numeric?
+        num = pd.to_numeric(s, errors="coerce")
+        if num.notna().mean() > 0.8:
+            return num.astype(float)
+
+        # 2) timedelta-like strings?
+        td = pd.to_timedelta(s.astype(str), errors="coerce")
+        if td.notna().mean() > 0.8:
+            return td.dt.total_seconds()
+
+        # 3) fallback
+        return num.astype(float)
+
     # 1) Absolute timestamp
     ts_col = pick_timestamp_column(d)
     if ts_col:
@@ -347,16 +361,21 @@ def build_global_time_seconds(
         if t.notna().any():
             return (t - t.iloc[0]).dt.total_seconds()
 
-    # 2) Total Time (HH:MM:SS-like)
-    if time_col and time_col in d.columns and time_col.lower() == "total time":
-        td = pd.to_timedelta(d[time_col].astype(str), errors="coerce")
-        return (td - td.iloc[0]).dt.total_seconds()
+    # 2) Total Time (absolute already)  ✅ FIXED: numeric stays numeric (seconds), strings become timedeltas
+    if time_col and time_col in d.columns and str(time_col).lower() == "total time":
+        sec = _to_seconds(d[time_col])
+        sec = sec.fillna(method="ffill").fillna(0.0)
+        out = sec - float(sec.iloc[0])
+        return out
 
-    # 3) Stitch step-local 'Time'
-    raw = d[time_col] if (time_col and time_col in d.columns) else None
-    if raw is None:
+    # 3) Stitch step-local 'Time' (resets each step)
+    if not time_col or time_col not in d.columns:
         return pd.Series(np.zeros(len(d)), index=d.index, dtype="float64")
 
+    raw = d[time_col]
+    sec = _to_seconds(raw)
+
+    # Group key for stitching
     if cycle_col in d.columns and step_col in d.columns:
         gkey = d[cycle_col].astype("Int64").astype(str) + "|" + d[step_col].astype(str)
     elif cycle_col in d.columns:
@@ -364,26 +383,40 @@ def build_global_time_seconds(
     elif step_col in d.columns:
         gkey = d[step_col].astype(str)
     else:
-        gkey = pd.Series(range(len(d)), index=d.index)
-
-    sec = pd.to_numeric(raw, errors="coerce")
-    if sec.isna().all():
-        sec = pd.to_timedelta(raw.astype(str), errors="coerce").dt.total_seconds()
+        gkey = pd.Series(range(len(d)), index=d.index).astype(str)
 
     within = sec.groupby(gkey).transform(lambda s: s - s.iloc[0])
 
     # stable order of groups (by first appearance)
     _, first_idx = np.unique(gkey.to_numpy(), return_index=True)
     ordered_groups = gkey.iloc[np.sort(first_idx)]
+
     offsets: Dict[str, float] = {}
     total = 0.0
+
     for grp in ordered_groups:
         offsets[grp] = total
-        last = within[gkey == grp].iloc[-1]
-        total += float(last if pd.notna(last) else 0.0)
+        s_grp = within[gkey == grp].dropna()
+        if s_grp.empty:
+            continue
+
+        dur = float(s_grp.max())
+
+        # add one sample interval to prevent duplicate boundary timestamps
+        raw_grp = sec[gkey == grp].dropna()
+        if len(raw_grp) > 1:
+            dt = float(raw_grp.diff().median())
+            if not np.isfinite(dt) or dt <= 0:
+                dt = 0.0
+        else:
+            dt = 0.0
+
+        total += dur + dt
 
     stitched = within + gkey.map(offsets).astype(float)
-    return stitched - stitched.iloc[0]
+    stitched = stitched - float(stitched.iloc[0])
+
+    return stitched
 
 def insert_line_breaks_vq(df: pd.DataFrame, cap_col: str, v_col: str) -> pd.DataFrame:
     if df.empty or cap_col not in df.columns or v_col not in df.columns:
@@ -922,7 +955,8 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
             "Step_Index": np.full(npts, step_idx, dtype=int),
             "Cycle Index": np.full(npts, cycle, dtype=int),
             "Step Type": np.full(npts, step_type),
-            "Time": _time_str_from_seconds(t_abs),  # <- key fix (avoids nano/pico if your code uses pd.to_timedelta)
+            "Time": t_rel,
+            "Total Time": t_abs,
             "Voltage(V)": v,
             "Current(mA)": np.full(npts, current_mA),
             "Spec. Cap.(mAh/g)": q_spec,
@@ -945,7 +979,8 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
             "Step_Index": np.full(npts, step_idx, dtype=int),
             "Cycle Index": np.full(npts, cycle, dtype=int),
             "Step Type": np.full(npts, "Rest"),
-            "Time": _time_str_from_seconds(t_abs),
+            "Time": t_rel,
+            "Total Time": t_abs,
             "Voltage(V)": v,
             "Current(mA)": np.zeros(npts),
             "Spec. Cap.(mAh/g)": np.zeros(npts),
