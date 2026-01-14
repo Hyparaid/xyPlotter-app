@@ -883,7 +883,6 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
                 df = infer_rest_step(df)
                 df["__file"] = disp
                 df["__family"] = family_from_filename(disp)
-                # restore attrs if present
                 am = item.get("active_mass_g")
                 if isinstance(am, (int, float)) and am > 0:
                     df.attrs["active_mass_g"] = float(am)
@@ -891,8 +890,7 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
             if parsed:
                 return parsed
         except Exception:
-            # fall back to synthetic
-            pass
+            pass  # fall back to synthetic
 
     # ----------------------------
     # Synthetic demo (no external files needed)
@@ -900,27 +898,31 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
     rng = np.random.default_rng(42)
     demo: Dict[str, pd.DataFrame] = {}
 
-    def make_profile(n, kind="charge"):
-        x = np.linspace(0, 1, n)
-        if kind == "charge":
-            # S-shaped rise
-            return 0.05 + 0.95 * (1/(1+np.exp(-8*(x-0.35))))
-        else:
-            return 0.05 + 0.95 * (1 - 1/(1+np.exp(-8*(x-0.35))))
+    # Make Time look like Neware-like elapsed time strings so pd.to_timedelta(...) works as expected downstream.
+    def _time_str_from_seconds(t_s: np.ndarray) -> np.ndarray:
+        return pd.to_timedelta(t_s, unit="s").astype(str).to_numpy()
 
-    def step_df(step_idx, cycle, step_type, duration_s, npts, current_mA, q_spec_end, am_g, v_kind):
-        t = np.linspace(0, duration_s, npts)
+    def make_profile(n, kind="charge"):
+        x = np.linspace(0, 1, n, endpoint=False)
+        if kind == "charge":
+            return 0.05 + 0.95 * (1 / (1 + np.exp(-8 * (x - 0.35))))
+        else:
+            return 0.05 + 0.95 * (1 - 1 / (1 + np.exp(-8 * (x - 0.35))))
+
+    def step_df(step_idx, cycle, step_type, t0_s, duration_s, npts, current_mA, q_spec_end, am_g, v_kind):
+        # endpoint=False avoids duplicate timestamps at step boundaries
+        t_rel = np.linspace(0, duration_s, npts, endpoint=False)
+        t_abs = t0_s + t_rel
+
         v = make_profile(npts, kind=v_kind)
-        # add light noise
-        #v = v + rng.normal(0, 0.003, size=npts)
-        q_spec = np.linspace(0, q_spec_end, npts)
+        q_spec = np.linspace(0, q_spec_end, npts, endpoint=False)
         q_mAh = q_spec * am_g
 
         row = {
             "Step_Index": np.full(npts, step_idx, dtype=int),
             "Cycle Index": np.full(npts, cycle, dtype=int),
             "Step Type": np.full(npts, step_type),
-            "Time": t,
+            "Time": _time_str_from_seconds(t_abs),  # <- key fix (avoids nano/pico if your code uses pd.to_timedelta)
             "Voltage(V)": v,
             "Current(mA)": np.full(npts, current_mA),
             "Spec. Cap.(mAh/g)": q_spec,
@@ -932,16 +934,18 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
             "Chg. Cap.(mAh)": np.where(current_mA > 0, q_mAh, np.nan),
             "DChg. Cap.(mAh)": np.where(current_mA < 0, q_mAh, np.nan),
         }
-        return pd.DataFrame(row)
+        return pd.DataFrame(row), (t0_s + duration_s)
 
-    def rest_df(step_idx, cycle, duration_s, npts, v_level):
-        t = np.linspace(0, duration_s, npts)
+    def rest_df(step_idx, cycle, t0_s, duration_s, npts, v_level):
+        t_rel = np.linspace(0, duration_s, npts, endpoint=False)
+        t_abs = t0_s + t_rel
         v = np.full(npts, v_level) + rng.normal(0, 0.0015, size=npts)
+
         row = {
             "Step_Index": np.full(npts, step_idx, dtype=int),
             "Cycle Index": np.full(npts, cycle, dtype=int),
             "Step Type": np.full(npts, "Rest"),
-            "Time": t,
+            "Time": _time_str_from_seconds(t_abs),
             "Voltage(V)": v,
             "Current(mA)": np.zeros(npts),
             "Spec. Cap.(mAh/g)": np.zeros(npts),
@@ -953,18 +957,19 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
             "Chg. Cap.(mAh)": np.nan,
             "DChg. Cap.(mAh)": np.nan,
         }
-        return pd.DataFrame(row)
+        return pd.DataFrame(row), (t0_s + duration_s)
 
-    def pulse_df(step_idx, cycle, duration_s, npts, current_mA, v_pre, dv):
-        t = np.linspace(0, duration_s, npts)
-        # exponential response for DCIR
-        v = v_pre + dv * (1 - np.exp(-t/2.5))
+    def pulse_df(step_idx, cycle, t0_s, duration_s, npts, current_mA, v_pre, dv):
+        t_rel = np.linspace(0, duration_s, npts, endpoint=False)
+        t_abs = t0_s + t_rel
+        v = v_pre + dv * (1 - np.exp(-t_rel / 2.5))
         v = v + rng.normal(0, 0.0015, size=npts)
+
         row = {
             "Step_Index": np.full(npts, step_idx, dtype=int),
             "Cycle Index": np.full(npts, cycle, dtype=int),
             "Step Type": np.full(npts, "Pulse"),
-            "Time": t,
+            "Time": _time_str_from_seconds(t_abs),
             "Voltage(V)": v,
             "Current(mA)": np.full(npts, current_mA),
             "Spec. Cap.(mAh/g)": np.zeros(npts),
@@ -976,7 +981,7 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
             "Chg. Cap.(mAh)": np.nan,
             "DChg. Cap.(mAh)": np.nan,
         }
-        return pd.DataFrame(row)
+        return pd.DataFrame(row), (t0_s + duration_s)
 
     # Build 4 demo files
     specs = [
@@ -985,33 +990,52 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
         ("Demo-Ref_1", 780, 750),
         ("Demo-Ref_2", 790, 760),
     ]
-    for i, (name, qchg1, qdch1) in enumerate(specs):
+
+    # Longer steps so elapsed time ends up ~50 h (nice-looking “real test” scale)
+    CYCLES = 10
+    CHG_S = 7200   # 2 h
+    DCHG_S = 7200  # 2 h
+    REST_S = 1800  # 0.5 h
+
+    # Points per step (keep files not too huge, still smooth)
+    NPTS_CHG = 600
+    NPTS_DCHG = 600
+    NPTS_REST = 120
+
+    for name, qchg1, qdch1 in specs:
         am_g = float(rng.uniform(0.006, 0.015))  # fake active mass
         frames = []
         step_idx = 1
+        t0_s = 0.0  # absolute elapsed time (seconds)
 
-        # 10 cycles of simple chg/dchg
-        for cyc in range(1, 11):
-            # fade slightly over cycles
+        for cyc in range(1, CYCLES + 1):
             fade = 1.0 - 0.015 * (cyc - 1)
             qchg = qchg1 * fade * float(rng.uniform(0.98, 1.02))
             qdch = qdch1 * fade * float(rng.uniform(0.98, 1.02))
 
-            frames.append(step_df(step_idx, cyc, "CC Chg", 1800, 350, +100.0, qchg, am_g, "charge")); step_idx += 1
-            frames.append(rest_df(step_idx, cyc, 600, 80, 1.0)); step_idx += 1
-            frames.append(step_df(step_idx, cyc, "CC DChg", 1800, 350, -100.0, qdch, am_g, "discharge")); step_idx += 1
-            frames.append(rest_df(step_idx, cyc, 600, 80, 0.05)); step_idx += 1
+            df, t0_s = step_df(step_idx, cyc, "CC Chg", t0_s, CHG_S, NPTS_CHG, +100.0, qchg, am_g, "charge")
+            frames.append(df); step_idx += 1
 
-        # add a DCIR pulse block at cycle 11
-        cyc = 11
+            df, t0_s = rest_df(step_idx, cyc, t0_s, REST_S, NPTS_REST, 1.0)
+            frames.append(df); step_idx += 1
+
+            df, t0_s = step_df(step_idx, cyc, "CC DChg", t0_s, DCHG_S, NPTS_DCHG, -100.0, qdch, am_g, "discharge")
+            frames.append(df); step_idx += 1
+
+            df, t0_s = rest_df(step_idx, cyc, t0_s, REST_S, NPTS_REST, 0.05)
+            frames.append(df); step_idx += 1
+
+        # Optional DCIR pulse block at cycle CYCLES+1
+        cyc = CYCLES + 1
         soc_levels = [80, 50, 20, 5]
         for soc in soc_levels:
-            # two pulses per SOC with rests
             for _ in range(2):
-                v_pre = 0.2 + 0.0075 * soc  # higher SOC higher OCV
-                frames.append(rest_df(step_idx, cyc, 120, 60, v_pre)); step_idx += 1
-                # discharge pulse: negative current, voltage drops
-                frames.append(pulse_df(step_idx, cyc, 18, 60, -500.0, v_pre, dv=-0.06)); step_idx += 1
+                v_pre = 0.2 + 0.0075 * soc
+                df, t0_s = rest_df(step_idx, cyc, t0_s, 120, 60, v_pre)
+                frames.append(df); step_idx += 1
+
+                df, t0_s = pulse_df(step_idx, cyc, t0_s, 18, 60, -500.0, v_pre, dv=-0.06)
+                frames.append(df); step_idx += 1
 
         d = _concat_nonempty(frames)
         d = normalize_neware_headers(d)
@@ -1022,6 +1046,7 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
         demo[name] = d.reset_index(drop=True)
 
     return demo
+
 
 def _activate_demo():
     demo = load_demo_frames()
