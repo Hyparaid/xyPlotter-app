@@ -340,20 +340,6 @@ def build_global_time_seconds(
 ) -> pd.Series:
     d = df
 
-    def _to_seconds(s: pd.Series) -> pd.Series:
-        # 1) numeric?
-        num = pd.to_numeric(s, errors="coerce")
-        if num.notna().mean() > 0.8:
-            return num.astype(float)
-
-        # 2) timedelta-like strings?
-        td = pd.to_timedelta(s.astype(str), errors="coerce")
-        if td.notna().mean() > 0.8:
-            return td.dt.total_seconds()
-
-        # 3) fallback
-        return num.astype(float)
-
     # 1) Absolute timestamp
     ts_col = pick_timestamp_column(d)
     if ts_col:
@@ -361,29 +347,38 @@ def build_global_time_seconds(
         if t.notna().any():
             return (t - t.iloc[0]).dt.total_seconds()
 
-    # 2) Total Time (absolute already)  ✅ FIXED: numeric stays numeric (seconds), strings become timedeltas
-    if time_col and time_col in d.columns and str(time_col).lower() == "total time":
-        sec = _to_seconds(d[time_col])
-        sec = sec.fillna(method="ffill").fillna(0.0)
-        out = sec - float(sec.iloc[0])
-        return out
-
-    # 3) Stitch step-local 'Time' (resets each step)
+    # Need a time column
     if not time_col or time_col not in d.columns:
         return pd.Series(np.zeros(len(d)), index=d.index, dtype="float64")
 
     raw = d[time_col]
-    sec = _to_seconds(raw)
 
-    # Group key for stitching
-    if cycle_col in d.columns and step_col in d.columns:
-        gkey = d[cycle_col].astype("Int64").astype(str) + "|" + d[step_col].astype(str)
-    elif cycle_col in d.columns:
-        gkey = d[cycle_col].astype("Int64").astype(str)
-    elif step_col in d.columns:
-        gkey = d[step_col].astype(str)
+    # Parse to seconds (numeric OR timedelta strings)
+    sec = pd.to_numeric(raw, errors="coerce")
+    if sec.isna().mean() > 0.2:
+        td = pd.to_timedelta(raw.astype(str), errors="coerce")
+        sec = td.dt.total_seconds()
+
+    sec = sec.fillna(method="ffill").fillna(0.0)
+
+    # 2) If it's already absolute / monotonic, just return it
+    if str(time_col).lower() == "total time" or pd.Series(sec).is_monotonic_increasing:
+        return sec - float(sec.iloc[0])
+
+    # 3) Stitch step-local time using a SAFE grouping key
+    # ✅ CRITICAL FIX: prefer Step_Index (unique per step)
+    if "Step_Index" in d.columns:
+        gkey = pd.to_numeric(d["Step_Index"], errors="coerce").fillna(method="ffill").fillna(0).astype(int).astype(str)
     else:
-        gkey = pd.Series(range(len(d)), index=d.index).astype(str)
+        # fallback: run-length segments (cycle/step changes or time reset)
+        boundary = pd.Series(False, index=d.index)
+        if cycle_col in d.columns:
+            boundary |= d[cycle_col].ne(d[cycle_col].shift())
+        if step_col in d.columns:
+            boundary |= d[step_col].astype(str).ne(d[step_col].astype(str).shift())
+        boundary |= sec.diff().fillna(0) < 0
+        boundary |= (sec == 0) & (sec.shift().fillna(0) > 0)
+        gkey = boundary.cumsum().astype(int).astype(str)
 
     within = sec.groupby(gkey).transform(lambda s: s - s.iloc[0])
 
@@ -393,30 +388,22 @@ def build_global_time_seconds(
 
     offsets: Dict[str, float] = {}
     total = 0.0
-
     for grp in ordered_groups:
         offsets[grp] = total
-        s_grp = within[gkey == grp].dropna()
-        if s_grp.empty:
-            continue
+        w = within[gkey == grp].dropna()
+        dur = float(w.max()) if not w.empty else 0.0
 
-        dur = float(s_grp.max())
-
-        # add one sample interval to prevent duplicate boundary timestamps
-        raw_grp = sec[gkey == grp].dropna()
-        if len(raw_grp) > 1:
-            dt = float(raw_grp.diff().median())
-            if not np.isfinite(dt) or dt <= 0:
-                dt = 0.0
-        else:
+        # add one typical dt to avoid boundary duplicates
+        sg = sec[gkey == grp].dropna()
+        dt = float(sg.diff().median()) if len(sg) > 1 else 0.0
+        if not np.isfinite(dt) or dt < 0:
             dt = 0.0
 
         total += dur + dt
 
     stitched = within + gkey.map(offsets).astype(float)
-    stitched = stitched - float(stitched.iloc[0])
+    return stitched - float(stitched.iloc[0])
 
-    return stitched
 
 def insert_line_breaks_vq(df: pd.DataFrame, cap_col: str, v_col: str) -> pd.DataFrame:
     if df.empty or cap_col not in df.columns or v_col not in df.columns:
