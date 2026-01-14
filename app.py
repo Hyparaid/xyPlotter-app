@@ -51,14 +51,11 @@ st.set_page_config(
 
 HERE = Path(__file__).parent
 
-_theme = st_theme(key="__theme") 
-_theme_base = (_theme or {}).get("base")
+_theme = st_theme(key="app_theme") or {}
+BASE_THEME = _theme.get("base")
 
-# Fallback if theme is briefly None on first render
-if _theme_base not in ("light", "dark"):
-    _theme_base = st.get_option("theme.base") or "light"
-
-IS_DARK = (_theme_base == "dark")
+if BASE_THEME not in ("light", "dark"):
+    BASE_THEME = st.get_option("theme.base") or "light"
 
 # ----------------------------
 # Demo / portfolio mode
@@ -155,9 +152,36 @@ warnings.filterwarnings(
 # ----------------------------
 # Helpers
 # ----------------------------
-def style_for_ppt(fig):
+def apply_preli_style(fig, base: str, show_grid: bool = True, for_export: bool = False):
+    """
+    - On screen: adapts to Streamlit light/dark.
+    - On export: forces PPT-friendly styling + transparent background.
+    """
+    is_dark = (base == "dark") and (not for_export)
+
+    # Colors
+    if for_export or not is_dark:
+        fg = "#000000"
+        grid = NV_COLORDICT["nv_gray3"]
+        paper_bg = "rgba(0,0,0,0)" if for_export else "#ffffff"
+        plot_bg  = "rgba(0,0,0,0)" if for_export else "#ffffff"
+        legend_bg = "rgba(255,255,255,0.90)"
+        legend_border = "rgba(0,0,0,0.35)"
+    else:
+        # use Streamlit theme background when available
+        bg = st.get_option("theme.backgroundColor") or "#0E1117"
+        fg = "#ffffff"
+        grid = "rgba(255,255,255,0.18)"
+        paper_bg = bg
+        plot_bg = bg
+        legend_bg = "rgba(0,0,0,0.35)"
+        legend_border = "rgba(255,255,255,0.25)"
+
     fig.update_layout(
-        font=dict(family="Arial", size=16, color="black"),
+        template=None,  # important: stop Plotly template overriding your styling
+        font=dict(family="Arial", size=16, color=fg),
+        paper_bgcolor=paper_bg,
+        plot_bgcolor=plot_bg,
         margin=dict(l=80, r=40, t=60, b=80),
         legend=dict(
             orientation="h",
@@ -165,87 +189,50 @@ def style_for_ppt(fig):
             y=1.02,
             xanchor="left",
             x=0,
-            bordercolor="black",
-            borderwidth=0.5,
-            bgcolor="rgba(255,255,255,0.9)",
+            bordercolor=legend_border,
+            borderwidth=0.8,
+            bgcolor=legend_bg,
         ),
     )
+
     fig.update_xaxes(
-        showline=True, linecolor="black", linewidth=1, mirror=True,
+        showline=True, linecolor=fg, linewidth=1, mirror=True,
         ticks="outside", tickwidth=1, ticklen=6,
-        title_font=dict(family="Arial", size=14, color="black"),
-        tickfont=dict(family="Arial", size=14, color="black"),
+        title_font=dict(family="Arial", size=14, color=fg),
+        tickfont=dict(family="Arial", size=14, color=fg),
+        showgrid=bool(show_grid),
+        gridcolor=grid,
+        gridwidth=0.5,
+        zeroline=False,
     )
     fig.update_yaxes(
-        showline=True, linecolor="black", linewidth=1, mirror=True,
+        showline=True, linecolor=fg, linewidth=1, mirror=True,
         ticks="outside", tickwidth=1, ticklen=6,
-        title_font=dict(family="Arial", size=14, color="black"),
-        tickfont=dict(family="Arial", size=14, color="black"),
-    )
-
-def apply_plotly_theme(fig, *, dark: bool):
-    fg = "white" if dark else "black"
-    grid = "rgba(255,255,255,0.18)" if dark else NV_COLORDICT["nv_gray3"]
-    paper = "rgba(0,0,0,0)"  # transparent so Streamlit theme shows through
-
-    fig.update_layout(
-        template="plotly_dark" if dark else "plotly_white",
-        paper_bgcolor=paper,
-        plot_bgcolor=paper,
-        font=dict(color=fg),
-        legend=dict(
-            font=dict(color=fg),
-            bordercolor=fg,
-            bgcolor="rgba(0,0,0,0.25)" if dark else "rgba(255,255,255,0.9)",
-        ),
-    )
-    fig.update_xaxes(
-        color=fg,
-        title_font=dict(color=fg),
-        tickfont=dict(color=fg),
-        showline=True,
-        linecolor=fg,
+        title_font=dict(family="Arial", size=14, color=fg),
+        tickfont=dict(family="Arial", size=14, color=fg),
+        showgrid=bool(show_grid),
         gridcolor=grid,
-        zerolinecolor=grid,
-    )
-    fig.update_yaxes(
-        color=fg,
-        title_font=dict(color=fg),
-        tickfont=dict(color=fg),
-        showline=True,
-        linecolor=fg,
-        gridcolor=grid,
-        zerolinecolor=grid,
+        gridwidth=0.5,
+        zeroline=False,
     )
 
-def add_ppt_download(fig, filename_base: str, key: str | None = None):
+def add_ppt_download(fig, filename_base: str, *, show_grid: bool = True):
     buf = io.BytesIO()
-
     try:
-        # Make a copy so we don't change the on-screen figure
-        fig_ppt = go.Figure(fig)
-
-        # Force a clean light style for PPT export
-        apply_plotly_theme(fig_ppt, dark=False)
-
-        fig_ppt.write_image(
-            buf,
-            format="png",
-            width=1600,
-            height=900,
-            scale=2,
-        )
+        fig_export = go.Figure(fig)  # clone
+        apply_preli_style(fig_export, base="light", show_grid=show_grid, for_export=True)  # transparent export
+        fig_export.write_image(buf, format="png", width=1600, height=900, scale=2)
     except Exception:
         st.info("Static image export not available. Install `kaleido` to enable PNG downloads.")
         return
 
     buf.seek(0)
     st.download_button(
-        label="⬇️ Download PNG for PPT",
+        label="⬇️ Download PNG for PPT (transparent)",
         data=buf,
         file_name=f"{filename_base}.png",
         mime="image/png",
-        key=key or f"dl_{filename_base}",
+        key=f"dl_{filename_base}",
     )
 
 def pretty_src(src: str) -> str:
@@ -1048,7 +1035,7 @@ def _activate_demo():
 # ----------------------------
 LOGO_LIGHT_PATH = HERE / "logo_light.png"
 LOGO_DARK_PATH  = HERE / "logo_dark.png"
-
+IS_DARK = (BASE_THEME == "dark")
 logo_path = LOGO_DARK_PATH if IS_DARK else LOGO_LIGHT_PATH
 
 c1, c2, c3 = st.columns([1, 1, 1])
@@ -1510,9 +1497,9 @@ if view == "Voltage–Time":
         fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-    style_for_ppt(fig_vt)
+    apply_preli_style(fig_vt,base=BASE_THEME,show_grid=show_grid_global)  
     st.plotly_chart(fig_vt, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_vt, filename_base="voltage_time", key="plot_voltage_time")  
+    add_ppt_download(fig_vt, filename_base="voltage_time")  
     st.stop()
 
 # ----------------------------
@@ -1596,9 +1583,9 @@ if view == "Voltage–Capacity":
         fig_vq.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         fig_vq.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-    apply_plotly_theme(fig_vq, dark=IS_DARK)   # <-- on-screen adapts to Streamlit theme
+    apply_preli_style(fig_vq, base=BASE_THEME, show_grid=show_grid_global)   # <-- on-screen adapts to Streamlit theme
     st.plotly_chart(fig_vq, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_vq, filename_base="voltage_capacity",key="plot_voltage_capacity")  # <-- exports light copy
+    add_ppt_download(fig_vq, filename_base="voltage_capacity")  # <-- exports light copy
     st.stop()
 
 # ----------------------------
@@ -1651,9 +1638,9 @@ if view == "Capacity vs Cycle":
     fig_cap.update_xaxes(title_text="Cycle", showgrid=show_grid_global, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
     fig_cap.update_yaxes(title_text=y_label, showgrid=show_grid_global, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-    apply_plotly_theme(fig_cap, dark=IS_DARK)   # <-- on-screen adapts to Streamlit theme
+    apply_preli_style(fig_cap, base=BASE_THEME, show_grid=show_grid_global)   # <-- on-screen adapts to Streamlit theme
     st.plotly_chart(fig_cap, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_cap, filename_base="capacity_vs_cycle", key="plot_capacity_vs_cycle")  # <-- exports light copy
+    add_ppt_download(fig_cap, filename_base="capacity_vs_cycle")  # <-- exports light copy
     st.stop()
 
 # ----------------------------
@@ -1727,11 +1714,10 @@ if view == "Capacity & CE":
         fig_ce.update_yaxes(showgrid=False, secondary_y=False)
         fig_ce.update_yaxes(showgrid=False, secondary_y=True)
 
-    apply_plotly_theme(fig_ce, dark=IS_DARK)   # <-- on-screen adapts to Streamlit theme
+    apply_preli_style(fig_ce, base=BASE_THEME, show_grid=show_grid_global)   
     st.plotly_chart(fig_ce, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_ce, filename_base="ce_and_capacity", key="plot_ce_and_capacity")  # <-- exports light copy
+    add_ppt_download(fig_ce, filename_base="ce_and_capacity",)  
     st.stop()
-
 # ----------------------------
 # DCIR
 # ----------------------------
