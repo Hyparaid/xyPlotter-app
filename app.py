@@ -1522,7 +1522,6 @@ if view == "Voltage–Time":
 
         s["_t"] = build_global_time_seconds(s, time_col=tcol, cycle_col="Cycle Index", step_col="Step Type")
         s = s.dropna(subset=["_t", vcol]).sort_values("_t")
-        s = s.loc[~s["_t"].duplicated(keep="first")]
         if s.empty:
             continue
 
