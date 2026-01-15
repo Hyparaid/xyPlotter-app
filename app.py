@@ -1521,7 +1521,11 @@ if view == "Voltage–Time":
             continue
 
         s["_t"] = build_global_time_seconds(s, time_col=tcol, cycle_col="Cycle Index", step_col="Step Type")
-        s = s.dropna(subset=["_t", vcol]).sort_values("_t")
+        s = s.dropna(subset=["_t", vcol])
+        if "Step_Index" in s.columns:
+            s = s.sort_values(["Step_Index", "_t"])   # keeps steps in correct sequence
+        else:
+            s = s.sort_values("_t")
         if s.empty:
             continue
 
