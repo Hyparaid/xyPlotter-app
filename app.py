@@ -2075,7 +2075,7 @@ if view == "ICE Boxplot":
             ax.text(
                 positions[i], y_max * 0.9,
                 f"ICE: {ice_mean:.2f} ± {ice_std:.2f}%",
-                ha="center", va="center", fontsize=8,
+                ha="center", va="center", fontsize=5,
                 bbox=dict(facecolor="white", edgecolor="black", alpha=0.9),
             )
 
