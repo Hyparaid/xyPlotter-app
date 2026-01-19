@@ -2051,7 +2051,7 @@ if view == "ICE Boxplot":
     ax.set_xticks(positions)
     ax.set_xticklabels(groups)
     ax.set_ylabel(y_label)
-    ax.set_title(f"First-cycle charge / discharge capacity and ICE ({ce_cell_type} CE)")
+    ax.set_title(f"First-cycle capacity and ICE ")
     ax.grid(axis="y", linestyle="--", linewidth=0.5, color=NV_COLORDICT["nv_gray3"])
 
     handles, labels = ax.get_legend_handles_labels()
