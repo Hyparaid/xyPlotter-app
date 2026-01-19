@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
 import warnings
@@ -366,9 +367,15 @@ def build_global_time_seconds(
         return sec - float(sec.iloc[0])
 
     # 3) Stitch step-local time using a SAFE grouping key
-    # ✅ CRITICAL FIX: prefer Step_Index (unique per step)
+    # Use run-length segments so repeating Step_Index values across cycles don't get merged.
     if "Step_Index" in d.columns:
-        gkey = pd.to_numeric(d["Step_Index"], errors="coerce").fillna(method="ffill").fillna(0).astype(int).astype(str)
+        stp = pd.to_numeric(d["Step_Index"], errors="coerce").fillna(method="ffill").fillna(0)
+        boundary = stp.ne(stp.shift())
+        if cycle_col in d.columns:
+            boundary |= d[cycle_col].ne(d[cycle_col].shift())
+        boundary |= sec.diff().fillna(0) < 0
+        boundary |= (sec == 0) & (sec.shift().fillna(0) > 0)
+        gkey = boundary.cumsum().astype(int).astype(str)
     else:
         # fallback: run-length segments (cycle/step changes or time reset)
         boundary = pd.Series(False, index=d.index)
@@ -722,13 +729,19 @@ def insert_line_breaks_generic(
                 break_pos.append(i)
 
     # 2) Step changes
-    if seg_step and "Step Type" in d.columns:
-        stp = d["Step Type"].astype(str)
-        for i in range(n - 1):
-            if stp.iloc[i + 1] != stp.iloc[i]:
-                break_pos.append(i)
+    if seg_step:
+        if "Step_Index" in d.columns:
+            stp = pd.to_numeric(d["Step_Index"], errors="coerce").fillna(method="ffill").fillna(0).astype(int)
+            for i in range(n - 1):
+                if stp.iloc[i + 1] != stp.iloc[i]:
+                    break_pos.append(i)
+        elif "Step Type" in d.columns:
+            stp = d["Step Type"].astype(str)
+            for i in range(n - 1):
+                if stp.iloc[i + 1] != stp.iloc[i]:
+                    break_pos.append(i)
 
-    # 3) Capacity resets (only if we have a usable capacity column)
+# 3) Capacity resets (only if we have a usable capacity column)
     if seg_cap_reset and isinstance(cap_col_name, str) and cap_col_name in d.columns:
         cap = pd.to_numeric(d[cap_col_name], errors="coerce").fillna(0.0)
         idxs = cap[(cap.shift(-1) == 0) & (cap > 0)].index.tolist()
@@ -1299,7 +1312,7 @@ G = detect_columns(union_cols)
 PAGES = [
     "XY Builder", "Voltage–Time", "Voltage–Capacity",
     "Capacity vs Cycle", "Capacity & CE", "DCIR",
-    "ICE Boxplot", "Raw File Preview",
+    "ICE Boxplot", "Capacity Fade Boxplot", "Raw File Preview",
 ]
 
 
@@ -1540,7 +1553,7 @@ if view == "Voltage–Time":
     unit = st.selectbox("Time units", ["seconds", "minutes", "hours"], 0)
     DIV = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
     ABBR = {"seconds": "s", "minutes": "min", "hours": "h"}
-
+    break_by_step = st.checkbox("Break lines by step", value=False, key="vt_break_steps")
     fig_vt = go.Figure()
     for src in selected_files:
         df = parsed_by_file[src]
@@ -1553,16 +1566,27 @@ if view == "Voltage–Time":
 
         s["_t"] = build_global_time_seconds(s, time_col=tcol, cycle_col="Cycle Index", step_col="Step Type")
         s = s.dropna(subset=["_t", vcol])
-        if "Step_Index" in s.columns:
-            s = s.sort_values(["Step_Index", "_t"])   # keeps steps in correct sequence
-        else:
-            s = s.sort_values("_t")
+        # IMPORTANT: Voltage–Time must be ordered by absolute time.
+        # Sorting by Step_Index can reorder time when Step_Index repeats (causes crossing lines).
+        s = s.sort_values("_t")
         if s.empty:
             continue
 
+        
+        s_plot = s.copy()
+        if break_by_step:
+            s_plot = insert_line_breaks_generic(
+                s_plot,
+                x_col="_t",
+                y_col=vcol,
+                seg_step=True,
+                seg_cycle=False,
+                seg_current_flip=("Current(mA)" in s_plot.columns),
+            )
+
         fig_vt.add_trace(go.Scatter(
-            x=s["_t"] / DIV[unit],
-            y=s[vcol],
+            x=s_plot["_t"] / DIV[unit],
+            y=s_plot[vcol],
             name=pretty_src(src),
             mode=("lines+markers" if show_markers else "lines"),
             line=dict(color=color_for_src(src), width=line_width),
@@ -1995,6 +2019,8 @@ if view == "ICE Boxplot":
         st.info("Could not compute capacities / ICE for any selected file.")
         st.stop()
 
+
+
     rows = []
     ce_rows = []
     for fam, vals in grouped.items():
@@ -2109,6 +2135,158 @@ if view == "ICE Boxplot":
     )
     plt.close(fig)
     st.stop()
+
+# ----------------------------
+# Capacity Fade Boxplot (cycle window)
+# ----------------------------
+if view == "Capacity Fade Boxplot":
+    st.subheader("Capacity fade boxplot (cycle window)")
+
+    if not selected_files:
+        st.info("Select at least one NDAX/NDAX demo file on the left.")
+        st.stop()
+
+    # Detect cycle bounds across selected files
+    mins, maxs = [], []
+    for src in selected_files:
+        df = parsed_by_file.get(src)
+        if df is None or df.empty or "Cycle Index" not in df.columns:
+            continue
+        cyc = pd.to_numeric(df["Cycle Index"], errors="coerce")
+        cyc = cyc.dropna()
+        if cyc.empty:
+            continue
+        mins.append(int(cyc.min()))
+        maxs.append(int(cyc.max()))
+
+    if not mins:
+        st.error("Could not detect 'Cycle Index' in the selected files.")
+        st.stop()
+
+    min_cycle = int(min(mins))
+    max_cycle = int(max(maxs))
+
+    max_window = 100
+    default_start = min_cycle
+    default_end = min(min_cycle + max_window, max_cycle)
+
+    c0, c1, c2, c3 = st.columns([2, 2, 2, 2])
+    with c0:
+        y_metric = st.selectbox(
+            "Y metric",
+            ["Discharge capacity", "Charge capacity", "CE (%)"],
+            index=0,
+            key="capfade_y_metric",
+        )
+    with c1:
+        x_mode = st.selectbox("X axis", ["Cycle", "Group"], index=0, key="capfade_x_axis")
+
+
+    start, end = st.slider(
+        "**Cycle range** (100 cycle window)",
+        min_value=min_cycle,
+        max_value=max_cycle,
+        value=(default_start, default_end),
+        step=1,
+        key="capfade_cycle_range",
+    )
+
+    if (end - start) > max_window:
+        end = min(start + max_window, max_cycle)
+        st.info(f"Window capped at {max_window} cycles → showing {start}–{end}")
+    if end <= start:
+        st.warning("End cycle must be greater than start cycle.")
+        st.stop()
+
+    # Build plotting table: one value per file per cycle
+    ce_cell_type = "cathode" if cell_type_sel == "full" else cell_type_sel
+
+    rows = []
+    for src in selected_files:
+        df = parsed_by_file.get(src)
+        if df is None or df.empty or "Cycle Index" not in df.columns:
+            continue
+
+        fam = family_from_filename(src)
+        ce_df = compute_ce(df, cell_type=ce_cell_type)
+        if ce_df is None or ce_df.empty:
+            continue
+
+        ce_df = ce_df[(ce_df["cycle"] >= start) & (ce_df["cycle"] <= end)].copy()
+        if ce_df.empty:
+            continue
+
+        if y_metric == "Discharge capacity":
+            ycol = "q_dch"
+            yvals = ce_df[ycol]
+        elif y_metric == "Charge capacity":
+            ycol = "q_chg"
+            yvals = ce_df[ycol]
+        else:
+            ycol = "ce"
+            yvals = ce_df[ycol]
+
+        for cyc, val in zip(ce_df["cycle"].tolist(), pd.to_numeric(yvals, errors="coerce").tolist()):
+            if val is None or (isinstance(val, float) and not np.isfinite(val)):
+                continue
+            rows.append({"Cycle": int(cyc), "Value": float(val), "Group": fam, "File": src})
+
+    if not rows:
+        st.info("No data found in that cycle window for the selected files.")
+        st.stop()
+
+    df_plot = pd.DataFrame(rows)
+
+    # Y label
+    if y_metric == "CE (%)":
+        y_label = "Coulombic efficiency (%)"
+    else:
+        # heuristic: if any selected file has spec capacity columns, label as mAh/g
+        has_spec = any(
+            c in union_cols for c in [
+                "Spec. Cap.(mAh/g)",
+                "DChg. Spec. Cap.(mAh/g)",
+                "Chg. Spec. Cap.(mAh/g)",
+            ]
+        )
+        y_label = f"{y_metric} (mAh/g)" if has_spec else f"{y_metric} (mAh)"
+
+    if x_mode == "Group":
+        fig_box = px.box(
+            df_plot,
+            x="Group",
+            y="Value",
+            color="Group",
+            points="all",
+            labels={"Group": "Group", "Value": y_label},
+        )
+        fig_box.update_layout(title=f"{y_metric} distribution by group (cycles {start}–{end})")
+    else:
+        # per-cycle boxplots, grouped by group color
+        fig_box = px.box(
+            df_plot,
+            x="Cycle",
+            y="Value",
+            color="Group",
+            points="all",
+            labels={"Cycle": "Cycle", "Value": y_label, "Group": "Group"},
+        )
+        fig_box.update_xaxes(type="category", tickangle=45)
+        fig_box.update_layout(boxmode="group", title=f"{y_metric} — cycles {start}–{end}")
+    fig_box.update_layout(legend_title_text="")
+    fig_box.update_traces(
+    selector=dict(type="box"),
+    boxpoints="all",   # (already implied by points="all", but harmless)
+    jitter=0.15,       # <-- reduce (try 0.05–0.25)
+    pointpos=0,        # center the points over the box
+    marker=dict(size=6, opacity=0.7),
+)    
+
+    apply_preli_style(fig_box, base=BASE_THEME, show_grid=show_grid_global)
+    st.plotly_chart(fig_box, width="stretch", config=CAMERA_CFG)
+    add_ppt_download(fig_box, filename_base=f"capfade_box_{int(start)}_{int(end)}")
+    st.stop()
+
 
 # Fallback
 st.success("Loaded. Use the tabs above to explore your NDAX data.")
