@@ -404,6 +404,37 @@ def build_global_time_seconds(
     stitched = within + gkey.map(offsets).astype(float)
     return stitched - float(stitched.iloc[0])
 
+def auto_rotate_xticks(fig, ax, rotation=45, ha="right", pad_px=2):
+    """
+    Keep x tick labels horizontal unless they overlap or are clipped.
+    Returns True if it rotated.
+    """
+    # Ensure text positions/sizes are finalized
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    labels = [t for t in ax.get_xticklabels() if t.get_text()]
+    if not labels:
+        return False
+
+    bboxes = [t.get_window_extent(renderer=renderer) for t in labels]
+    bboxes = sorted(bboxes, key=lambda b: b.x0)
+
+    # Overlap check (adjacent bboxes)
+    overlap = any(bboxes[i].x1 + pad_px > bboxes[i + 1].x0 for i in range(len(bboxes) - 1))
+
+    # Clipping check (label extends beyond axes)
+    ax_bb = ax.get_window_extent(renderer=renderer)
+    clipped = any(b.x0 < ax_bb.x0 or b.x1 > ax_bb.x1 for b in bboxes)
+
+    if overlap or clipped:
+        for t in ax.get_xticklabels():
+            t.set_rotation(rotation)
+            t.set_ha(ha)
+        fig.tight_layout()
+        return True
+
+    return False
 
 def insert_line_breaks_vq(df: pd.DataFrame, cap_col: str, v_col: str) -> pd.DataFrame:
     if df.empty or cap_col not in df.columns or v_col not in df.columns:
@@ -2050,6 +2081,7 @@ if view == "ICE Boxplot":
 
     ax.set_xticks(positions)
     ax.set_xticklabels(groups)
+    auto_rotate_xticks(fig, ax, rotation=45, ha="right")
     ax.set_ylabel(y_label)
     ax.set_title(f"First-cycle capacity and ICE ")
     ax.grid(axis="y", linestyle="--", linewidth=0.5, color=NV_COLORDICT["nv_gray3"])
