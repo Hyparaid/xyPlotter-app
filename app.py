@@ -2134,7 +2134,7 @@ if view == "ICE Boxplot":
 # Capacity Fade Boxplot (cycle window)
 # ----------------------------
 if view == "Capacity Fade Boxplot":
-    st.subheader("Capacity fade boxplot (cycle window)")
+    st.subheader("Capacity fade boxplot ")
 
     if not selected_files:
         st.info("Select at least one NDAX/NDAX demo file on the left.")
