@@ -58,13 +58,6 @@ if BASE_THEME not in ("light", "dark"):
     BASE_THEME = st.get_option("theme.base") or "light"
 
 # ----------------------------
-# Demo / portfolio mode
-# ----------------------------
-# NOTE: This app uses ONLY the built-in synthetic demo dataset.
-# (No manifest / external demo pack is supported or required.)
-
-
-# ----------------------------
 # Styling / colors
 # ----------------------------
 NV_COLORDICT = {
@@ -940,8 +933,8 @@ def _hybrid_anonymize_df(df: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
 
     return _downsample_light(d)
 
-@st.cache_data(show_spinner=False)
-def load_demo_frames() -> Dict[str, pd.DataFrame]:
+DEMO_VERSION = 1
+def load_demo_frames(_demo_version: str = DEMO_VERSION) -> Dict[str, pd.DataFrame]:
     """
     Load demo frames.
 
