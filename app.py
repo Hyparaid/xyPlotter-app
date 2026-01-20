@@ -933,7 +933,7 @@ def _hybrid_anonymize_df(df: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
 
     return _downsample_light(d)
 
-DEMO_VERSION = 1
+DEMO_VERSION = 1069
 def load_demo_frames(_demo_version: str = DEMO_VERSION) -> Dict[str, pd.DataFrame]:
     """
     Load demo frames.
