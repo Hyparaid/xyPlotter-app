@@ -1153,7 +1153,7 @@ if not uploaded_files and "parsed_by_file" not in st.session_state:
     row_l, row_r = st.columns([6, 2])
 
     with row_l:
-        st.info("Upload one or more NDAX files and press 🚀 launch or simply explore the app with a demo dataset.")
+        st.info("Upload one or more NDAX files and press 🚀 **launch** or simply explore the app with a demo dataset.")
 
     with row_r:
         st.markdown("""
