@@ -208,18 +208,6 @@ def apply_preli_style(fig, base: str, show_grid: bool = True, for_export: bool =
         gridwidth=0.5,
         zeroline=False,
     )
-    # Hover formatting (global defaults)
-    fig.update_xaxes(hoverformat=".2f")
-    fig.update_yaxes(hoverformat=".2f")
-
-    # Make hover label easier to read (optional)
-    fig.update_layout(
-        hoverlabel=dict(
-            font=dict(family="Arial", size=14),
-            namelength=-1,  # don't shorten trace name in hover *if it appears*
-        )
-    )
-
 
 def add_ppt_download(fig, filename_base: str, *, show_grid: bool = True):
     buf = io.BytesIO()
