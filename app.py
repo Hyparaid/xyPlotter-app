@@ -2243,7 +2243,7 @@ if view == "Capacity Fade Boxplot":
             points="all",
             labels={"Cycle": "Cycle", "Value": y_label, "Group": "Group"},
         )
-        fig_box.update_xaxes(type="category", tickangle=45)
+        fig_box.update_xaxes(type="category", tickangle=30)
         fig_box.update_layout(boxmode="group", title=f"{y_metric} — cycles {start}–{end}")
     fig_box.update_layout(legend_title_text="")
     fig_box.update_traces(
