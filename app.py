@@ -275,8 +275,14 @@ def normalize_neware_headers(df: pd.DataFrame) -> pd.DataFrame:
                 lower_map[target.lower()] = target
                 break
 
-    ensure("Total Time", "totaltime", "total time")
-    ensure("Time", "time(s)", "time")
+    # Time columns come in many variants depending on export settings.
+    ensure(
+        "Total Time",
+        "totaltime", "total time", "total_time",
+        "total time(s)", "total time (s)", "total time[s]",
+        "totaltime(s)", "totaltime (s)",
+    )
+    ensure("Time", "time(s)", "time (s)", "time", "time[s]")
     ensure("Voltage(V)", "voltage (v)", "voltage")
     ensure("Current(mA)", "current (ma)", "current")
 
@@ -354,11 +360,13 @@ def build_global_time_seconds(
 
     raw = d[time_col]
 
-    # Parse to seconds (numeric OR timedelta strings)
-    sec = pd.to_numeric(raw, errors="coerce")
-    if sec.isna().mean() > 0.2:
-        td = pd.to_timedelta(raw.astype(str), errors="coerce")
-        sec = td.dt.total_seconds()
+    # Parse to seconds.
+    # Neware exports can mix numeric seconds and timedelta-like strings (especially in demo packs).
+    # Instead of switching wholesale to timedelta parsing, combine both representations.
+    sec_num = pd.to_numeric(raw, errors="coerce")
+    td = pd.to_timedelta(raw.astype(str), errors="coerce")
+    sec_td = td.dt.total_seconds()
+    sec = sec_num.where(sec_num.notna(), sec_td)
 
     sec = sec.fillna(method="ffill").fillna(0.0)
 
@@ -1553,7 +1561,6 @@ if view == "Voltage–Time":
     unit = st.selectbox("Time units", ["seconds", "minutes", "hours"], 0)
     DIV = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
     ABBR = {"seconds": "s", "minutes": "min", "hours": "h"}
-    break_by_step = st.checkbox("Break lines by step", value=False, key="vt_break_steps")
     fig_vt = go.Figure()
     for src in selected_files:
         df = parsed_by_file[src]
@@ -1572,21 +1579,9 @@ if view == "Voltage–Time":
         if s.empty:
             continue
 
-        
-        s_plot = s.copy()
-        if break_by_step:
-            s_plot = insert_line_breaks_generic(
-                s_plot,
-                x_col="_t",
-                y_col=vcol,
-                seg_step=True,
-                seg_cycle=False,
-                seg_current_flip=("Current(mA)" in s_plot.columns),
-            )
-
         fig_vt.add_trace(go.Scatter(
-            x=s_plot["_t"] / DIV[unit],
-            y=s_plot[vcol],
+            x=s["_t"] / DIV[unit],
+            y=s[vcol],
             name=pretty_src(src),
             mode=("lines+markers" if show_markers else "lines"),
             line=dict(color=color_for_src(src), width=line_width),
@@ -2135,7 +2130,6 @@ if view == "ICE Boxplot":
     )
     plt.close(fig)
     st.stop()
-
 # ----------------------------
 # Capacity Fade Boxplot (cycle window)
 # ----------------------------
