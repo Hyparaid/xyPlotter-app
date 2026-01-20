@@ -2,7 +2,6 @@
 import re
 import io
 import os
-import json
 import textwrap
 import math
 import hashlib
@@ -61,14 +60,8 @@ if BASE_THEME not in ("light", "dark"):
 # ----------------------------
 # Demo / portfolio mode
 # ----------------------------
-DEMO_DIR = HERE / "demo_data"
-DEMO_MANIFEST = DEMO_DIR / "manifest.json"
-
-# Detect Streamlit Cloud (path is typically /mount/src/<repo>/...)
-IS_STREAMLIT_CLOUD = "/mount/src/" in str(Path(__file__)).replace("\\", "/")
-# Optional override via environment
-FORCE_SYNTHETIC_DEMO = os.getenv("FORCE_SYNTHETIC_DEMO", "").strip().lower() in {"1","true","yes","y"}
-FORCE_MANIFEST_DEMO  = os.getenv("FORCE_MANIFEST_DEMO", "").strip().lower() in {"1","true","yes","y"}
+# NOTE: This app uses ONLY the built-in synthetic demo dataset.
+# (No manifest / external demo pack is supported or required.)
 
 
 # ----------------------------
@@ -951,39 +944,10 @@ def _hybrid_anonymize_df(df: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
 def load_demo_frames() -> Dict[str, pd.DataFrame]:
     """
     Load demo frames.
-    Priority:
-      1) demo_data/manifest.json + demo csv.gz files (created by the 'Create demo pack' tool)
-      2) built-in synthetic dataset (always available)
-    """
-    # On Streamlit Cloud we default to the built-in synthetic demo (more stable).
-    # You can override with FORCE_MANIFEST_DEMO=1 in Streamlit secrets / env.
-    use_manifest = DEMO_MANIFEST.exists() and (not FORCE_SYNTHETIC_DEMO) and (FORCE_MANIFEST_DEMO or (not IS_STREAMLIT_CLOUD))
 
-    if use_manifest:
-        try:
-            manifest = json.loads(DEMO_MANIFEST.read_text(encoding="utf-8"))
-            parsed: Dict[str, pd.DataFrame] = {}
-            for item in manifest.get("files", []):
-                rel = item.get("path")
-                disp = item.get("name")
-                if not rel or not disp:
-                    continue
-                p = DEMO_DIR / rel
-                if not p.exists():
-                    continue
-                df = pd.read_csv(p, compression="gzip")
-                df = normalize_neware_headers(df)
-                df = infer_rest_step(df)
-                df["__file"] = disp
-                df["__family"] = family_from_filename(disp)
-                am = item.get("active_mass_g")
-                if isinstance(am, (int, float)) and am > 0:
-                    df.attrs["active_mass_g"] = float(am)
-                parsed[disp] = df
-            if parsed:
-                return parsed
-        except Exception:
-            pass  # fall back to synthetic
+    We ONLY use the built-in synthetic dataset (no manifest / external demo pack).
+    This guarantees identical behavior locally and on Streamlit Cloud.
+    """
 
     # ----------------------------
     # Synthetic demo (no external files needed)
@@ -2151,7 +2115,6 @@ if view == "ICE Boxplot":
     )
     plt.close(fig)
     st.stop()
-
 # ----------------------------
 # Capacity Fade Boxplot (cycle window)
 # ----------------------------
