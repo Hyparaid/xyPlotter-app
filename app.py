@@ -64,6 +64,12 @@ if BASE_THEME not in ("light", "dark"):
 DEMO_DIR = HERE / "demo_data"
 DEMO_MANIFEST = DEMO_DIR / "manifest.json"
 
+# Detect Streamlit Cloud (path is typically /mount/src/<repo>/...)
+IS_STREAMLIT_CLOUD = "/mount/src/" in str(Path(__file__)).replace("\\", "/")
+# Optional override via environment
+FORCE_SYNTHETIC_DEMO = os.getenv("FORCE_SYNTHETIC_DEMO", "").strip().lower() in {"1","true","yes","y"}
+FORCE_MANIFEST_DEMO  = os.getenv("FORCE_MANIFEST_DEMO", "").strip().lower() in {"1","true","yes","y"}
+
 
 # ----------------------------
 # Styling / colors
@@ -357,27 +363,38 @@ def build_global_time_seconds(
     # Need a time column
     if not time_col or time_col not in d.columns:
         return pd.Series(np.zeros(len(d)), index=d.index, dtype="float64")
-
     raw = d[time_col]
 
     # Parse to seconds.
     # Neware exports can mix numeric seconds and timedelta-like strings (especially in demo packs).
     # Instead of switching wholesale to timedelta parsing, combine both representations.
-    sec_num = pd.to_numeric(raw, errors="coerce")
-    td = pd.to_timedelta(raw.astype(str), errors="coerce")
-    sec_td = td.dt.total_seconds()
-    sec = sec_num.where(sec_num.notna(), sec_td)
+    def _parse_seconds(x: pd.Series) -> pd.Series:
+        sec_num = pd.to_numeric(x, errors="coerce")
+        td = pd.to_timedelta(x.astype(str), errors="coerce")
+        sec_td = td.dt.total_seconds()
+        return sec_num.where(sec_num.notna(), sec_td)
 
-    sec = sec.fillna(method="ffill").fillna(0.0)
+    # Prefer the requested time column, but if it is sparsely populated (common in some demo exports),
+    # fall back to the other time column when it provides better coverage.
+    sec_primary = _parse_seconds(raw)
+    sec = sec_primary
+    if str(time_col).lower() == "total time" and "Time" in d.columns:
+        sec_alt = _parse_seconds(d["Time"])
+        if sec_primary.notna().mean() < 0.80 and sec_alt.notna().mean() > sec_primary.notna().mean():
+            sec = sec_alt
 
-    # 2) If it's already absolute / monotonic, just return it
-    if str(time_col).lower() == "total time" or pd.Series(sec).is_monotonic_increasing:
+    # Forward fill to handle occasional missing timestamps.
+    sec = sec.ffill().fillna(0.0)
+
+    # 2) If it's already absolute / monotonic (no resets), just return it.
+    # Don't rely on the column name; some exports label step-local time as 'Total Time'.
+    if (sec.diff().fillna(0) >= 0).all():
         return sec - float(sec.iloc[0])
 
     # 3) Stitch step-local time using a SAFE grouping key
     # Use run-length segments so repeating Step_Index values across cycles don't get merged.
     if "Step_Index" in d.columns:
-        stp = pd.to_numeric(d["Step_Index"], errors="coerce").fillna(method="ffill").fillna(0)
+        stp = pd.to_numeric(d["Step_Index"], errors="coerce").ffill().fillna(0)
         boundary = stp.ne(stp.shift())
         if cycle_col in d.columns:
             boundary |= d[cycle_col].ne(d[cycle_col].shift())
@@ -739,7 +756,7 @@ def insert_line_breaks_generic(
     # 2) Step changes
     if seg_step:
         if "Step_Index" in d.columns:
-            stp = pd.to_numeric(d["Step_Index"], errors="coerce").fillna(method="ffill").fillna(0).astype(int)
+            stp = pd.to_numeric(d["Step_Index"], errors="coerce").ffill().fillna(0).astype(int)
             for i in range(n - 1):
                 if stp.iloc[i + 1] != stp.iloc[i]:
                     break_pos.append(i)
@@ -938,7 +955,11 @@ def load_demo_frames() -> Dict[str, pd.DataFrame]:
       1) demo_data/manifest.json + demo csv.gz files (created by the 'Create demo pack' tool)
       2) built-in synthetic dataset (always available)
     """
-    if DEMO_MANIFEST.exists():
+    # On Streamlit Cloud we default to the built-in synthetic demo (more stable).
+    # You can override with FORCE_MANIFEST_DEMO=1 in Streamlit secrets / env.
+    use_manifest = DEMO_MANIFEST.exists() and (not FORCE_SYNTHETIC_DEMO) and (FORCE_MANIFEST_DEMO or (not IS_STREAMLIT_CLOUD))
+
+    if use_manifest:
         try:
             manifest = json.loads(DEMO_MANIFEST.read_text(encoding="utf-8"))
             parsed: Dict[str, pd.DataFrame] = {}
@@ -2130,6 +2151,7 @@ if view == "ICE Boxplot":
     )
     plt.close(fig)
     st.stop()
+
 # ----------------------------
 # Capacity Fade Boxplot (cycle window)
 # ----------------------------
