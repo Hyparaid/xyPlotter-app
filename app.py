@@ -8,6 +8,7 @@ import hashlib
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 from streamlit_theme import st_theme
 import numpy as np
 import pandas as pd
@@ -523,6 +524,112 @@ def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
         "cycle": pick("Cycle Index"),
         "step": pick("Step Type"),
     }
+
+
+# ----------------------------
+# dQ/dV helpers (minimal / defaults)
+# ----------------------------
+@dataclass
+class DQDVOptions:
+    dv_min: float = 0.005       # keep points only when |ΔV| >= dv_min
+    dv_eps: float = 1e-6        # drop derivatives when |ΔV| < dv_eps
+    derivative: str = "central" # forward|backward|central
+    shift: int = -1             # -1,0,+1 voltage alignment for central difference
+    smooth: int = 3             # moving-average window on dQ/dV (points)
+    smooth_center: bool = True
+
+def _reduce_by_dv(v: np.ndarray, dv_min: float) -> np.ndarray:
+    """Keep first point, then keep a point when |V - V_last_kept| >= dv_min."""
+    if len(v) == 0:
+        return np.array([], dtype=int)
+    if dv_min <= 0:
+        return np.arange(len(v), dtype=int)
+    keep = [0]
+    last = float(v[0])
+    for i in range(1, len(v)):
+        if abs(float(v[i]) - last) >= dv_min:
+            keep.append(i)
+            last = float(v[i])
+    return np.asarray(keep, dtype=int)
+
+def compute_dqdv_segment_df(seg: pd.DataFrame, vcol: str, qcol: str, opts: DQDVOptions) -> pd.DataFrame:
+    """Compute dQ/dV for one segment (charge OR discharge) given voltage + capacity columns."""
+    if seg is None or seg.empty or (vcol not in seg.columns) or (qcol not in seg.columns):
+        return pd.DataFrame(columns=["Voltage", "dQdV"])
+
+    s = seg[[vcol, qcol]].dropna().copy()
+    if s.empty:
+        return pd.DataFrame(columns=["Voltage", "dQdV"])
+
+    v = pd.to_numeric(s[vcol], errors="coerce").to_numpy(dtype=float)
+    q = pd.to_numeric(s[qcol], errors="coerce").to_numpy(dtype=float)
+
+    m = np.isfinite(v) & np.isfinite(q)
+    v = v[m]
+    q = q[m]
+    if len(v) < 2:
+        return pd.DataFrame(columns=["Voltage", "dQdV"])
+
+    # point reduction to avoid CV-region spikes from tiny dV
+    idx = _reduce_by_dv(v, float(opts.dv_min))
+    v = v[idx]
+    q = q[idx]
+    if len(v) < 2:
+        return pd.DataFrame(columns=["Voltage", "dQdV"])
+
+    der = str(opts.derivative).lower()
+    shift = int(opts.shift)
+    dv_eps = float(opts.dv_eps)
+
+    if der not in {"forward", "backward", "central"}:
+        der = "central"
+    if shift not in {-1, 0, 1}:
+        shift = -1
+
+    if der == "forward":
+        dv = np.diff(v)
+        dq = np.diff(q)
+        ok = np.abs(dv) >= dv_eps
+        dqdv = dq[ok] / dv[ok]
+        v_out = v[:-1][ok]
+    elif der == "backward":
+        dv = v[1:] - v[:-1]
+        dq = q[1:] - q[:-1]
+        ok = np.abs(dv) >= dv_eps
+        dqdv = dq[ok] / dv[ok]
+        v_out = v[1:][ok]
+    else:  # central
+        if len(v) < 3:
+            dv = np.diff(v)
+            dq = np.diff(q)
+            ok = np.abs(dv) >= dv_eps
+            dqdv = dq[ok] / dv[ok]
+            v_out = v[:-1][ok]
+        else:
+            dv = v[2:] - v[:-2]
+            dq = q[2:] - q[:-2]
+            ok = np.abs(dv) >= dv_eps
+            dqdv = dq[ok] / dv[ok]
+            if shift == -1:
+                v_out = v[:-2][ok]
+            elif shift == 0:
+                v_out = v[1:-1][ok]
+            else:
+                v_out = v[2:][ok]
+
+    out = pd.DataFrame({"Voltage": v_out, "dQdV": dqdv})
+
+    # smoothing
+    w = int(opts.smooth)
+    if w > 1 and len(out) > 1:
+        out["dQdV"] = (
+            out["dQdV"]
+            .rolling(window=w, center=bool(opts.smooth_center), min_periods=1)
+            .mean()
+        )
+
+    return out
+
 
 # ----------------------------
 # DCIR function (kept compatible)
@@ -1297,6 +1404,7 @@ G = detect_columns(union_cols)
 # ----------------------------
 PAGES = [
     "XY Builder", "Voltage–Time", "Voltage–Capacity",
+    "dQ/dV",
     "Capacity vs Cycle", "Capacity & CE", "DCIR",
     "ICE Boxplot", "Capacity Fade Boxplot", "Raw File Preview",
 ]
@@ -1305,7 +1413,7 @@ PAGES = [
 view = st.segmented_control(
     "View selector",
     options=PAGES,
-    default=PAGES[3],
+    default="Capacity vs Cycle",
     key="view_selector_main",
     label_visibility="collapsed",
 )
@@ -1666,6 +1774,257 @@ if view == "Voltage–Capacity":
     st.plotly_chart(fig_vq, width="stretch", config=CAMERA_CFG)
     add_ppt_download(fig_vq, filename_base="voltage_capacity")  # <-- exports light copy
     st.stop()
+
+
+# ----------------------------
+# dQ/dV
+# ----------------------------
+if view == "dQ/dV":
+    st.subheader("dQ/dV")
+
+    vcol = G.get("voltage")
+    cyc_col = G.get("cycle") if (G.get("cycle") in union_cols) else None
+    tcol = G.get("time") if (G.get("time") in union_cols) else None
+
+    if not vcol:
+        st.warning("Couldn’t detect voltage column.")
+        st.stop()
+    if not cyc_col:
+        st.info("Need Cycle Index to plot dQ/dV.")
+        st.stop()
+
+    mode = st.radio(
+        "Mode",
+        ["Single cycle (compare files)", "Cycle overlay (one file)"],
+        horizontal=True,
+        key="dqdv_mode",
+    )
+
+    # Defaults (same spirit as your script; no extra tuning controls here)
+    opts = DQDVOptions()
+
+    def _get_current_mA(df: pd.DataFrame) -> Tuple[Optional[pd.Series], Optional[str]]:
+        if "Current(mA)" in df.columns:
+            s = pd.to_numeric(df["Current(mA)"], errors="coerce")
+            return s, "Current(mA)"
+        if "Current(A)" in df.columns:
+            s = pd.to_numeric(df["Current(A)"], errors="coerce") * 1000.0
+            return s, "Current(A)"
+        return None, None
+
+    def _pick_qcols(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
+        base_cap = G.get("capacity")
+        ch_qcol = None
+        for cand in ["Chg. Spec. Cap.(mAh/g)", "Charge_Capacity(mAh)", "Charge Capacity(mAh)", base_cap]:
+            if cand and cand in df.columns:
+                ch_qcol = cand
+                break
+        dch_qcol = None
+        for cand in ["DChg. Spec. Cap.(mAh/g)", "Discharge_Capacity(mAh)", "Discharge Capacity(mAh)", base_cap]:
+            if cand and cand in df.columns:
+                dch_qcol = cand
+                break
+        return ch_qcol, dch_qcol
+
+    def _cycles_from_df(df: pd.DataFrame) -> List[int]:
+        if cyc_col not in df.columns:
+            return []
+        s = pd.to_numeric(df[cyc_col], errors="coerce").dropna()
+        vals = sorted(pd.unique(s))
+        out = []
+        for c in vals:
+            try:
+                cf = float(c)
+                if cf.is_integer():
+                    out.append(int(cf))
+            except Exception:
+                pass
+        return out
+
+    fig = go.Figure()
+    any_qcol = None
+
+    if mode == "Single cycle (compare files)":
+        # Collect available cycles across selected files
+        cyc_values = []
+        for df in frames_selected:
+            if cyc_col in df.columns:
+                cyc_values.append(pd.to_numeric(df[cyc_col], errors="coerce").dropna())
+        cycles_available = sorted(pd.unique(pd.concat(cyc_values, ignore_index=True))) if cyc_values else []
+        cycles_available = [int(c) for c in cycles_available if float(c).is_integer()]
+
+        if not cycles_available:
+            st.info("No cycle data found in the selected files.")
+            st.stop()
+
+        default_cycle = 1 if 1 in cycles_available else cycles_available[0]
+        sel_cycle = st.selectbox(
+            "Cycle",
+            cycles_available,
+            index=cycles_available.index(default_cycle),
+            key="dqdv_cycle_select_compare",
+        )
+
+        for src_name in selected_files:
+            df = parsed_by_file.get(src_name)
+            if df is None or df.empty:
+                continue
+            if cyc_col not in df.columns or vcol not in df.columns:
+                continue
+
+            d = df[df[cyc_col] == sel_cycle].copy()
+            if d.empty:
+                continue
+
+            # sort by time if possible (keeps segments clean)
+            if tcol and tcol in d.columns:
+                d[tcol] = pd.to_numeric(d[tcol], errors="coerce")
+                d = d.sort_values(tcol)
+
+            cur_mA, _ = _get_current_mA(d)
+            if cur_mA is None:
+                continue
+
+            ch_qcol, dch_qcol = _pick_qcols(d)
+            if not ch_qcol and not dch_qcol:
+                continue
+            any_qcol = any_qcol or (ch_qcol or dch_qcol)
+
+            ch_seg = d[cur_mA > 0.0]
+            dch_seg = d[cur_mA < 0.0]
+
+            ch_curve = compute_dqdv_segment_df(ch_seg, vcol=vcol, qcol=ch_qcol, opts=opts) if ch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
+            dch_curve = compute_dqdv_segment_df(dch_seg, vcol=vcol, qcol=dch_qcol, opts=opts) if dch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
+
+            color = color_for_src(src_name)
+
+            if not ch_curve.empty:
+                fig.add_trace(go.Scatter(
+                    x=ch_curve["Voltage"], y=ch_curve["dQdV"],
+                    mode="lines",
+                    name=pretty_src(src_name),
+                    legendgroup=pretty_src(src_name),
+                    line=dict(color=color, width=line_width, dash="solid"),
+                ))
+            if not dch_curve.empty:
+                fig.add_trace(go.Scatter(
+                    x=dch_curve["Voltage"], y=dch_curve["dQdV"],
+                    mode="lines",
+                    name=pretty_src(src_name),
+                    legendgroup=pretty_src(src_name),
+                    showlegend=False,
+                    line=dict(color=color, width=line_width, dash="solid"),
+                ))
+
+        title = f"dQ/dV vs Voltage — Cycle {sel_cycle}"
+
+    else:
+        # Overlay a cycle range for a single file
+        if not selected_files:
+            st.info("Select at least one file to plot.")
+            st.stop()
+
+        src_name = st.selectbox(
+            "File",
+            options=selected_files,
+            format_func=pretty_src,
+            key="dqdv_file_select_overlay",
+        )
+        df = parsed_by_file.get(src_name)
+        if df is None or df.empty:
+            st.info("Selected file has no data.")
+            st.stop()
+
+        cycles_available = _cycles_from_df(df)
+        if not cycles_available:
+            st.info("No cycle data found in that file.")
+            st.stop()
+
+        cmin, cmax = min(cycles_available), max(cycles_available)
+        # sensible default range
+        default_end = min(cmin + 9, cmax)
+        c_start, c_end = st.slider(
+            "Cycle range",
+            min_value=cmin,
+            max_value=cmax,
+            value=(cmin, default_end),
+            step=1,
+            key="dqdv_cycle_range_overlay",
+        )
+
+        # Precompute palette for cycles
+        cycle_list = list(range(c_start, c_end + 1))
+        for i, cyc in enumerate(cycle_list):
+            d = df[df[cyc_col] == cyc].copy()
+            if d.empty:
+                continue
+
+            if tcol and tcol in d.columns:
+                d[tcol] = pd.to_numeric(d[tcol], errors="coerce")
+                d = d.sort_values(tcol)
+
+            cur_mA, _ = _get_current_mA(d)
+            if cur_mA is None:
+                continue
+
+            ch_qcol, dch_qcol = _pick_qcols(d)
+            if not ch_qcol and not dch_qcol:
+                continue
+            any_qcol = any_qcol or (ch_qcol or dch_qcol)
+
+            ch_seg = d[cur_mA > 0.0]
+            dch_seg = d[cur_mA < 0.0]
+
+            ch_curve = compute_dqdv_segment_df(ch_seg, vcol=vcol, qcol=ch_qcol, opts=opts) if ch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
+            dch_curve = compute_dqdv_segment_df(dch_seg, vcol=vcol, qcol=dch_qcol, opts=opts) if dch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
+
+            color = palette[i % len(palette)] if len(palette) else None
+
+            label = f"Cycle {cyc}"
+            if not ch_curve.empty:
+                fig.add_trace(go.Scatter(
+                    x=ch_curve["Voltage"], y=ch_curve["dQdV"],
+                    mode="lines",
+                    name=label,
+                    legendgroup=label,
+                    line=dict(color=color, width=line_width, dash="solid"),
+                ))
+            if not dch_curve.empty:
+                fig.add_trace(go.Scatter(
+                    x=dch_curve["Voltage"], y=dch_curve["dQdV"],
+                    mode="lines",
+                    name=label,
+                    legendgroup=label,
+                    showlegend=False,
+                    line=dict(color=color, width=line_width, dash="solid"),
+                ))
+
+        title = f"dQ/dV vs Voltage — {pretty_src(src_name)} (Cycles {c_start}–{c_end})"
+
+    if len(fig.data) == 0:
+        st.info("No dQ/dV data found for the selection.")
+        st.stop()
+
+    y_label = "dQ/dV (mAh/V)"
+    if any_qcol and ("mAh/g" in str(any_qcol)):
+        y_label = "dQ/dV (mAh/g/V)"
+
+    fig.update_layout(
+        template="plotly_white",
+        title="",
+        xaxis_title=vcol,
+        yaxis_title=y_label,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, groupclick="togglegroup"),
+    )
+    if show_grid_global:
+        fig.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+        fig.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
+
+    apply_preli_style(fig, base=BASE_THEME, show_grid=show_grid_global)
+    st.plotly_chart(fig, width="stretch", config=CAMERA_CFG)
+    add_ppt_download(fig, filename_base="dqdv")
+    st.stop()
+
 
 # ----------------------------
 # Capacity vs Cycle
@@ -2209,6 +2568,10 @@ if view == "Capacity Fade Boxplot":
 
     df_plot = pd.DataFrame(rows)
 
+    # Use the same color mapping as the rest of the app
+    color_key = "File" if color_mode_global == "Per file" else "Group"
+    color_map = color_map_file if color_key == "File" else color_map_fam
+
     # Y label
     if y_metric == "CE (%)":
         y_label = "Coulombic efficiency (%)"
@@ -2228,8 +2591,9 @@ if view == "Capacity Fade Boxplot":
             df_plot,
             x="Group",
             y="Value",
-            color="Group",
+            color=color_key,
             points="all",
+            color_discrete_map=color_map,
             labels={"Group": "Group", "Value": y_label},
         )
         fig_box.update_layout(title=f"{y_metric} distribution by group (cycles {start}–{end})")
@@ -2239,8 +2603,9 @@ if view == "Capacity Fade Boxplot":
             df_plot,
             x="Cycle",
             y="Value",
-            color="Group",
+            color=color_key,
             points="all",
+            color_discrete_map=color_map,
             labels={"Cycle": "Cycle", "Value": y_label, "Group": "Group"},
         )
         fig_box.update_xaxes(type="category", tickangle=30)
