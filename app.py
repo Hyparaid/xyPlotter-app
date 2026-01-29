@@ -2018,10 +2018,10 @@ LOGO_DARK_PATH  = HERE / "logo_dark.png"
 IS_DARK = (BASE_THEME == "dark")
 logo_path = LOGO_DARK_PATH if IS_DARK else LOGO_LIGHT_PATH
 
-c1, c2, c3 = st.columns([1, 1, 1])
+c1, c2, c3 = st.columns([2, 1, 2])
 with c2:
     if logo_path.exists():
-        st.image(str(logo_path))
+        st.image(str(logo_path), width=200)
     else:
         st.caption(f"Logo missing: {logo_path.name}")
 
