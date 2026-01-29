@@ -2018,12 +2018,14 @@ LOGO_DARK_PATH  = HERE / "logo_dark.png"
 IS_DARK = (BASE_THEME == "dark")
 logo_path = LOGO_DARK_PATH if IS_DARK else LOGO_LIGHT_PATH
 
-c1, c2, c3 = st.columns([2, 1, 2])
+c1, c2, c3 = st.columns([1, 2, 0.5])
 with c2:
     if logo_path.exists():
-        st.image(str(logo_path), width=200)
+        st.image(str(logo_path), width=300)
     else:
         st.caption(f"Logo missing: {logo_path.name}")
+with c3:
+    st.toggle("⚡ Dynamic hover", value=st.session_state.get("dynamic_hover_mode", False), key="dynamic_hover_mode")
 
 st.title("🔋 BATTERY CELL DATA — VISUALIZER 📈")
 st.caption("::::::: Built by the Preli team ::::::::")
@@ -2041,9 +2043,7 @@ with st.sidebar.form("upload_form", clear_on_submit=False):
     parse_now = st.form_submit_button("🚀 **launch files**")
 
 # Provide an easy way to clear state
-top_l, top_r = st.columns([6, 1])
-with top_r:
-    st.toggle("⚡ Dynamic hover", value=st.session_state.get("dynamic_hover_mode", False), key="dynamic_hover_mode")
+
 
     if "parsed_by_file" in st.session_state:
         if st.button("🧹 Reset", key="clear_parsed_main"):
