@@ -2111,9 +2111,9 @@ if current_upload_names and set(current_upload_names) != set(cached_names) and n
 # Sidebar: options
 # ----------------------------
 
-with st.sidebar.expander("CE options", expanded=True):
+with st.sidebar.expander("Cell type", expanded=True):
     cell_type_sel = st.radio(
-        "Cell type (for CE direction)",
+        "select cell type",
         ["anode", "cathode", "full"],
         index=1,
         horizontal=True,
