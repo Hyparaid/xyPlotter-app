@@ -2,6 +2,7 @@
 import re
 import io
 import os
+import json
 import textwrap
 import math
 import hashlib
@@ -13,6 +14,7 @@ from streamlit_theme import st_theme
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -209,6 +211,800 @@ def apply_preli_style(fig, base: str, show_grid: bool = True, for_export: bool =
         gridwidth=0.5,
         zeroline=False,
     )
+
+# ----------------------------
+# Dota-like dynamic hover (client-side)
+# ----------------------------
+def _downsample_xy(x: np.ndarray, y: np.ndarray, max_points: int = 40000) -> Tuple[np.ndarray, np.ndarray]:
+    """Uniformly downsample (x, y) to at most max_points to keep browser hover smooth."""
+    if max_points is None or max_points <= 0:
+        return x, y
+    n = len(x)
+    if n <= max_points:
+        return x, y
+    idx = np.linspace(0, n - 1, int(max_points)).astype(int)
+    return x[idx], y[idx]
+
+
+def render_game_hover_plot(
+    traces: List[Dict[str, object]],
+    objectives: List[Dict[str, object]],
+    *,
+    base: str,
+    show_grid: bool,
+    x_title: str,
+    y_title: str,
+    hover_role: str = "both",
+    y_range: Optional[Tuple[float, float]] = None,
+    height: int = 560,
+):
+    """
+    Client-side Plotly.js render (no Streamlit reruns on hover).
+
+    This variant is tuned for a Dota-like feel:
+    - Plot shows only HORIZONTAL grid lines (y-axis grid). No vertical grid.
+    - Cursor shows only a VERTICAL line (x-axis spike). No horizontal cursor line.
+    - No right-side panel; instead:
+        - x-value pill sits at the TOP aligned with the cursor line.
+        - a compact tooltip stays CENTERED on the cursor.
+    - Hover fades non-active groups and emphasizes the active group (pure JS).
+    - Objectives (events) can be highlighted nearest-to-cursor (pure JS).
+    """
+    if not traces:
+        st.info("No data to draw.")
+        return
+
+    is_dark = (base == "dark")
+    bg = st.get_option("theme.backgroundColor") or ("#0E1117" if is_dark else "#ffffff")
+    fg = "#ffffff" if is_dark else "#000000"
+    grid = "rgba(255,255,255,0.18)" if is_dark else NV_COLORDICT["nv_gray3"]
+
+    # compute y-range for objective placement and axis padding
+    if y_range is not None:
+        try:
+            y_min = float(y_range[0])
+            y_max = float(y_range[1])
+        except Exception:
+            y_min, y_max = 0.0, 1.0
+    else:
+        y_all = []
+        for tr in traces:
+            y_all.extend([v for v in tr.get("y", []) if isinstance(v, (int, float)) and math.isfinite(v)])
+        if y_all:
+            y_min = float(min(y_all))
+            y_max = float(max(y_all))
+        else:
+            y_min, y_max = 0.0, 1.0
+    yr = y_max - y_min
+    if not math.isfinite(yr) or yr <= 0:
+        yr = 1.0
+
+    obj_y = y_max + 0.04 * yr
+    for o in objectives:
+        o["y"] = obj_y
+
+    pad_top = (0.10 * yr) if (y_range is None) else (0.02 * yr)
+    y_axis_max = y_max + pad_top
+    payload = {
+        "traces": traces,
+        "objectives": objectives,
+        "style": {
+            "bg": bg,
+            "fg": fg,
+            "grid": grid,
+            "spike": ("rgba(255,255,255,0.35)" if is_dark else "rgba(0,0,0,0.35)"),
+            "show_grid": bool(show_grid),
+            "x_title": x_title,
+            "y_title": y_title,
+            "y_min": y_min,
+            "y_max": y_axis_max,
+            "hover_role": str(hover_role),
+        },
+    }
+
+    div_id = "gh_" + hashlib.md5(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+
+    html = f"""
+<div id="{div_id}_wrap" style="position:relative;">
+  <style>
+    /* Hide Plotly default hover labels/points but KEEP hoverlayer so spike lines remain */
+    #{div_id} .hoverlayer .hovertext {{ display: none !important; }}
+    #{div_id} .hoverlayer .hoverpoints {{ display: none !important; }}
+  </style>
+  <div id="{div_id}" style="width:100%;height:{height}px;"></div>
+
+  <!-- x-value pill at the top, centered on cursor line -->
+  <div id="{div_id}_xpill" style="
+      position:absolute; top:0; left:0;
+      transform: translate(0%,-50%);
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.25);
+      background: rgba(255,255,255,0.16);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      color: {fg};
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      pointer-events:none;
+      display:none;
+      white-space:nowrap;
+  "></div>
+
+  <!-- centered hover info box -->
+  <div id="{div_id}_tip" style="
+      position:absolute; left:0; top:0;
+      transform: translate(0,-50%);
+      padding: 6px 6px;
+      border-radius: 14px;
+      background: transparent;
+      color: {fg};
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      pointer-events:none;
+      display:none;
+      min-width: 180px;
+      max-width: 340px;
+  "></div>
+</div>
+
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script>
+(() => {{
+  const payload = {json.dumps(payload)};
+  const el = document.getElementById("{div_id}");
+  const wrap = document.getElementById("{div_id}_wrap");
+  const xpill = document.getElementById("{div_id}_xpill");
+  const tip = document.getElementById("{div_id}_tip");
+
+  const hoverRole = (payload.style && payload.style.hover_role) ? String(payload.style.hover_role) : "both";
+
+  if (!el || typeof Plotly === "undefined") {{
+    if (el) {{
+      el.innerHTML = "<div style='padding:12px;'>Plotly.js not available in this environment.</div>";
+    }}
+    return;
+  }}
+
+  const tracesMeta = payload.traces.map(t => ({{
+    name: t.name,
+    group: t.group || "Other",
+    color: t.color || "#888",
+    role: t.role || "both",
+    baseOpacity: (t.opacity ?? 0.85),
+    baseWidth: (t.width ?? 2)
+  }}));
+
+  const lineTraces = payload.traces.map(t => ({{
+    type: "scattergl",
+    mode: "lines",
+    name: t.name,
+    x: t.x,
+    y: t.y,
+    line: {{ color: t.color || undefined, width: t.width || 2 }},
+    opacity: (t.opacity ?? 0.85),
+    legendgroup: (t.legendgroup || t.group || undefined),
+    showlegend: (t.showlegend !== undefined ? t.showlegend : true),
+    meta: {{ role: (t.role || "both") }},
+    hoverinfo: "skip",
+    hovertemplate: "<extra></extra>",   // hide default hover box
+  }}));
+
+  const obj = payload.objectives || [];
+  const objX = obj.map(o => o.x);
+  const objY = obj.map(o => o.y);
+  const objLabel = obj.map(o => o.label);
+
+  let sizes = obj.map(_ => 8);
+  let opac = obj.map(_ => 0.22);
+  let currentObjective = "";
+
+  const objTrace = {{
+    type: "scattergl",
+    mode: "markers",
+    x: objX,
+    y: objY,
+    customdata: objLabel,
+    hoverinfo: "skip",
+    hovertemplate: "%{{customdata}}<extra></extra>",
+    marker: {{
+      size: sizes,
+      opacity: opac,
+      line: {{ width: 0 }},
+    }},
+    showlegend: false,
+  }};
+
+  const layout = {{
+    paper_bgcolor: payload.style.bg,
+    plot_bgcolor: payload.style.bg,
+    font: {{ family: "Arial", size: 14, color: payload.style.fg }},
+    margin: {{ l: 80, r: 40, t: 40, b: 70 }},
+
+    // We still use hovermode 'x' to get all traces at a given x,
+    // but we hide Plotly's default hover labels and draw our own.
+    hovermode: "x",
+    hoverlabel: {{
+      bgcolor: "rgba(0,0,0,0)",
+      bordercolor: "rgba(0,0,0,0)",
+      font: {{ color: "rgba(0,0,0,0)" }},
+    }},
+
+    showlegend: true,
+    legend: {{
+      orientation: "h",
+      yanchor: "bottom",
+      y: 1.02,
+      xanchor: "left",
+      x: 0,
+      font: {{ size: 12 }},
+    }},
+
+    xaxis: {{
+      title: payload.style.x_title,
+      showline: true, mirror: true,
+      // vertical grid OFF
+      showgrid: false,
+      gridcolor: payload.style.grid,
+      zeroline: false,
+
+      // cursor line ON (vertical only)
+      showspikes: true,
+      spikemode: "across",
+      spikesnap: "cursor",
+      spikedash: "solid",
+      spikethickness: 1,
+    spikecolor: payload.style.spike,
+    }},
+
+    yaxis: {{
+      title: payload.style.y_title,
+      showline: true, mirror: true,
+      // horizontal grid ON (only if show_grid true)
+      showgrid: payload.style.show_grid,
+      gridcolor: payload.style.grid,
+      zeroline: false,
+      range: [payload.style.y_min, payload.style.y_max],
+
+      // cursor line OFF (no horizontal spike)
+      showspikes: false,
+    }},
+  }};
+
+  const config = {{
+    displayModeBar: false,
+    responsive: true,
+    scrollZoom: true
+  }};
+
+  const tracesAll = [...lineTraces, ...(obj.length ? [objTrace] : [])];
+  Plotly.newPlot(el, tracesAll, layout, config);
+
+  const lineIdx = Array.from({{length: lineTraces.length}}, (_, i) => i);
+  let activeGroup = null;
+
+  // Track current x-axis range (after zoom/pan) so the tooltip doesn't show
+  // values from points outside the visible window.
+  let xRange = null;
+  el.on("plotly_relayout", (e) => {{
+    try {{
+      if (!e) return;
+      let r0 = e["xaxis.range[0]"];
+      let r1 = e["xaxis.range[1]"];
+      const r = e["xaxis.range"];
+      if (Array.isArray(r) && r.length === 2) {{ r0 = r[0]; r1 = r[1]; }}
+      if (r0 !== undefined && r1 !== undefined) {{
+        const a = Number(r0); const b = Number(r1);
+        if (isFinite(a) && isFinite(b)) xRange = [Math.min(a,b), Math.max(a,b)];
+      }} else if (e["xaxis.autorange"]) {{
+        xRange = null;
+      }}
+    }} catch (_) {{}}
+  }});
+
+  function fmtNum(v) {{
+    if (v === null || v === undefined || !isFinite(v)) return "—";
+    const av = Math.abs(v);
+    if (av >= 1000) return v.toFixed(0);
+    if (av >= 100) return v.toFixed(1);
+    if (av >= 10) return v.toFixed(2);
+    return v.toFixed(3);
+  }}
+
+  function hexToRgba(hex, a) {{
+      if (!hex) return `rgba(0,0,0,${{a}})`;
+      const h0 = String(hex).trim();
+      if (h0.startsWith("rgba(")) return h0;
+      if (h0.startsWith("rgb(")) {{
+        return h0.replace("rgb(", "rgba(").replace(")", `,${{a}})`);
+      }}
+      let h = h0;
+      if (h[0] === "#") h = h.slice(1);
+      if (h.length === 3) h = h.split("").map(c => c + c).join("");
+      const n = parseInt(h, 16);
+      if (!isFinite(n)) return `rgba(0,0,0,${{a}})`;
+      const r = (n >> 16) & 255;
+      const g = (n >> 8) & 255;
+      const b = (n) & 255;
+      return `rgba(${{r}},${{g}},${{b}},${{a}})`;
+    }}
+  
+    const ENABLE_GROUP_HIGHLIGHT = false;
+
+  function setGroupHighlight(groupName, curveNumber) {{
+    if (!ENABLE_GROUP_HIGHLIGHT) return;
+    if (!groupName) {{
+      const op = tracesMeta.map(m => m.baseOpacity);
+      const lw = tracesMeta.map(m => m.baseWidth);
+      Plotly.restyle(el, {{"opacity": op, "line.width": lw}}, lineIdx);
+      activeGroup = null;
+      return;
+    }}
+    if (groupName === activeGroup) return;
+
+    const op = tracesMeta.map((m) => (m.group === groupName ? Math.min(1.0, m.baseOpacity + 0.12) : Math.min(0.15, m.baseOpacity)));
+    const lw = tracesMeta.map((m) => (m.group === groupName ? Math.max(m.baseWidth + 1, 2) : Math.max(1, m.baseWidth - 1)));
+    if (curveNumber !== null && curveNumber !== undefined && curveNumber < lw.length) {{
+      lw[curveNumber] = Math.max(lw[curveNumber], tracesMeta[curveNumber].baseWidth + 2);
+    }}
+    Plotly.restyle(el, {{"opacity": op, "line.width": lw}}, lineIdx);
+    activeGroup = groupName;
+  }}
+
+  function highlightNearestObjective(xVal) {{
+    if (!obj.length) return;
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < objX.length; i++) {{
+      const d = Math.abs(objX[i] - xVal);
+      if (d < bestD) {{ bestD = d; best = i; }}
+    }}
+    sizes = sizes.map(_ => 8);
+    opac  = opac.map(_ => 0.22);
+    sizes[best] = 18;
+    opac[best]  = 0.95;
+    currentObjective = objLabel[best] || "";
+
+    Plotly.restyle(el, {{
+      "marker.size": [sizes],
+      "marker.opacity": [opac]
+    }}, [lineTraces.length]);
+  }}
+
+  function clamp(v, lo, hi) {{
+    return Math.max(lo, Math.min(hi, v));
+  }}
+
+  function showOverlays(xVal, ev) {{
+    if (!wrap || !xpill || !tip) return;
+    const rect = wrap.getBoundingClientRect();
+
+    // x pixel aligned to axis (more accurate than clientX)
+    const xa = el._fullLayout.xaxis;
+    const xPix = xa.l2p(xVal) + xa._offset;    // y pinned to the vertical center of the plotting area (independent of mouse y)
+    const plotTop = el._fullLayout.yaxis._offset;   // top of plotting area
+    const plotLen = el._fullLayout.yaxis._length;   // height of plotting area
+
+    // Make tooltip measurable (it is normally display:none)
+    tip.style.display = "block";
+    const tipH = (tip && tip.offsetHeight) ? tip.offsetHeight : 220;
+
+    let yPix = plotTop + plotLen / 2; // centered in plot area
+    const yMin = plotTop + tipH / 2 + 6;
+    const yMax = plotTop + plotLen - tipH / 2 - 6;
+    yPix = clamp(yPix, yMin, yMax);
+
+    // Clamp cursor X for pill (keep aligned to spike line)
+    const leftBoundCursor = el._fullLayout.margin.l + 30;
+    const rightBoundCursor = rect.width - el._fullLayout.margin.r - 30;
+    const xCursor = clamp(xPix, leftBoundCursor, rightBoundCursor);
+
+    // x pill at top aligned with cursor line
+    xpill.style.left = xCursor + "px";
+    xpill.innerHTML = fmtNum(xVal);
+    xpill.style.display = "block";
+
+    // Tooltip should sit slightly to the RIGHT of the cursor, not centered on it.
+    // Clamp using the tooltip's current width to avoid overflow.
+    const tipW = (tip && tip.offsetWidth) ? tip.offsetWidth : 240;
+    const leftBoundTip = el._fullLayout.margin.l + 10;
+    const rightBoundTip = rect.width - el._fullLayout.margin.r - tipW - 10;
+    const xTip = clamp(xPix + 14, leftBoundTip, rightBoundTip);
+
+    tip.style.left = xTip + "px";
+    tip.style.top = yPix + "px";
+    tip.style.display = "block";  // Pin x-pill to the TOPMOST horizontal gridline (top of plot area),
+  // independent of tooltip position (Dota-like header line).
+  const pillH = (xpill && xpill.offsetHeight) ? xpill.offsetHeight : 26;
+  const yTopLine = el._fullLayout.yaxis._offset; // top of plotting area (top gridline)
+  let pillTop = yTopLine - Math.round(pillH / 2);
+  pillTop = clamp(pillTop, 4, rect.height - pillH - 4);
+  xpill.style.top = pillTop + "px";
+}}
+
+  function buildTip(ev) {{
+    if (!tip) return;
+
+    // Build compact list of trace values present in event points.
+    // In hovermode 'x', Plotly sends one point per trace (excluding objectives).
+    const rows = [];
+    const seen = new Set();
+
+    for (const p of (ev.points || [])) {{
+      const px = Number(p.x);
+      if (xRange && isFinite(px) && (px < xRange[0] || px > xRange[1])) continue;
+      if (p.curveNumber === undefined || p.curveNumber === null) continue;
+      if (p.curveNumber >= tracesMeta.length) continue; // skip objective trace
+      const role = (tracesMeta[p.curveNumber] && tracesMeta[p.curveNumber].role) ? tracesMeta[p.curveNumber].role : "both";
+      if (hoverRole !== "both" && role !== hoverRole) continue;
+      if (seen.has(p.curveNumber)) continue;
+      seen.add(p.curveNumber);
+
+      const m = tracesMeta[p.curveNumber];
+      rows.push({{
+        name: m.name,
+        color: m.color,
+        val: (typeof p.y === 'number' ? p.y : Number(p.y)),
+        group: m.group,
+        idx: p.curveNumber
+      }});
+    }}
+
+    // Order rows to match vertical order in the plot at the cursor: highest value on top
+    rows.sort((a,b) => ((b.val ?? -1e99) - (a.val ?? -1e99)) || (a.idx - b.idx));
+
+    let html = "";
+    if (currentObjective) {{
+      html += '<div style="opacity:0.9;margin-bottom:6px;font-weight:700;">' + currentObjective + '</div>';
+    }}
+
+    for (const r of rows) {{
+      html += '<div style="display:flex;justify-content:space-between;gap:10px;margin:3px 0;align-items:center;padding:4px 8px;border-radius:10px;background:' + hexToRgba(r.color, 0.20) + ';border-left:4px solid ' + r.color + ';">'
+           +    '<div style="display:flex;align-items:center;gap:6px;min-width:0;">'
+           +      '<span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:' + r.color + ';flex:0 0 auto;"></span>'
+           +      '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;">' + r.name + '</span>'
+           +    '</div>'
+           +    '<div style="opacity:0.92;">' + fmtNum(r.val) + '</div>'
+           +  '</div>';
+    }}
+
+    tip.innerHTML = html || "<div style='opacity:0.9;'>—</div>";
+  }}
+
+  function hideOverlays() {{
+    if (xpill) xpill.style.display = "none";
+    if (tip) tip.style.display = "none";
+    if (tip) tip.innerHTML = "";
+  }}
+
+  el.on("plotly_hover", (ev) => {{
+    if (!ev || !ev.points || !ev.points.length) return;
+
+    const xVal = ev.points[0].x;
+    // If we're zoomed/panned and Plotly reports a point outside the visible x-range, ignore.
+    if (xRange && isFinite(Number(xVal)) && (Number(xVal) < xRange[0] || Number(xVal) > xRange[1])) return;
+
+    // Trigger group highlight based on the point that initiated hover
+    const trigger = ev.points[0];
+    const cn = trigger.curveNumber;
+    const groupName = (cn !== null && cn !== undefined && cn < tracesMeta.length) ? tracesMeta[cn].group : null;
+    // setGroupHighlight disabled
+
+    highlightNearestObjective(xVal);
+    buildTip(ev);
+    showOverlays(xVal, ev);
+  }});
+
+  el.on("plotly_unhover", () => {{
+    // setGroupHighlight disabled
+    currentObjective = "";
+    hideOverlays();
+  }});
+}})();
+</script>
+"""
+    components.html(html, height=height + 30, scrolling=False)
+
+
+def pretty_src(src: str) -> str:
+    return Path(src).stem
+
+def family_from_filename(name: str) -> str:
+    stem = Path(str(name)).stem.lower()
+    for sep in ["_", "-", " "]:
+        if sep in stem:
+            stem = stem.split(sep)[0]
+            break
+    return re.sub(r"\d+$", "", stem) or stem
+
+def _concat_nonempty(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    if not frames:
+        return pd.DataFrame()
+    keep = []
+    cols = pd.Index([])
+    for f in frames:
+        if isinstance(f, pd.DataFrame):
+            cols = cols.union(f.columns)
+            if not f.empty and (not f.isna().all().all()):
+                keep.append(f)
+    if not keep:
+        return pd.DataFrame(columns=cols)
+    return pd.concat(keep, ignore_index=True, copy=False)
+
+def normalize_neware_headers(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    lower_map = {c.lower(): c for c in d.columns}
+
+    def ensure(target: str, *srcs: str):
+        if target in d.columns:
+            return
+        for s in srcs:
+            key = s.lower()
+            if key in lower_map:
+                d.rename(columns={lower_map[key]: target}, inplace=True)
+                lower_map[target.lower()] = target
+                break
+
+    # Time columns come in many variants depending on export settings.
+    ensure(
+        "Total Time",
+        "totaltime", "total time", "total_time",
+        "total time(s)", "total time (s)", "total time[s]",
+        "totaltime(s)", "totaltime (s)",
+    )
+    ensure("Time", "time(s)", "time (s)", "time", "time[s]")
+    ensure("Voltage(V)", "voltage (v)", "voltage")
+    ensure("Current(mA)", "current (ma)", "current")
+
+    ensure("Spec. Cap.(mAh/g)", "specific capacity (mAh/g)", "specific capacity (mah/g)", "spec cap (mah/g)")
+    ensure("Capacity(mAh)", "capacity (mah)", "capacity")
+    ensure("Chg. Spec. Cap.(mAh/g)", "chg. specific capacity (mAh/g)", "chg. spec. cap.(mAh/g)")
+    ensure("DChg. Spec. Cap.(mAh/g)", "dchg. specific capacity (mAh/g)", "dchg. spec. cap.(mAh/g)")
+    ensure("Chg. Cap.(mAh)", "chg. capacity (mah)")
+    ensure("DChg. Cap.(mAh)", "dchg. capacity (mah)")
+
+    ensure("Cycle Index", "cycle", "cycle number", "cycle_index")
+    ensure("Step Type", "status", "state", "mode", "step")
+    return d
+
+def infer_rest_step(
+    df: pd.DataFrame,
+    step_col: str = "Step Type",
+    current_col: str = "Current(mA)",
+    abs_threshold: float = 0.5,
+    win: int = 5,
+) -> pd.DataFrame:
+    d = df.copy()
+    if current_col not in d.columns:
+        return d
+    cur = pd.to_numeric(d[current_col], errors="coerce")
+    med = cur.rolling(win, min_periods=1, center=True).median().abs()
+    is_rest = med <= abs_threshold
+    if step_col in d.columns:
+        stype = d[step_col].astype(str)
+        mask = (stype == "") | stype.isna()
+        d.loc[mask & is_rest, step_col] = "Rest"
+    else:
+        d[step_col] = np.where(is_rest, "Rest", "")
+    return d
+
+TIMESTAMP_CANDIDATES = [
+    "Timestamp", "TimeStamp", "Record Time", "RecordTime", "Date Time", "DateTime",
+    "datetime", "Measured Time", "MeasuredTime", "Test Time", "TestTime", "Start Time", "StartTime",
+    "System Time", "Local Time"
+]
+
+def pick_timestamp_column(df: pd.DataFrame) -> Optional[str]:
+    for c in TIMESTAMP_CANDIDATES:
+        if c in df.columns:
+            return c
+    lower = {col.lower(): col for col in df.columns}
+    for c in TIMESTAMP_CANDIDATES:
+        if c.lower() in lower:
+            return lower[c.lower()]
+    # heuristic: any column with many parseable datetimes
+    for c in df.columns:
+        s = pd.to_datetime(df[c], errors="coerce")
+        if s.notna().mean() > 0.8:
+            return c
+    return None
+
+def build_global_time_seconds(
+    df: pd.DataFrame,
+    time_col: Optional[str],
+    cycle_col: str = "Cycle Index",
+    step_col: str  = "Step Type",
+) -> pd.Series:
+    d = df
+
+    # 1) Absolute timestamp
+    ts_col = pick_timestamp_column(d)
+    if ts_col:
+        t = pd.to_datetime(d[ts_col], errors="coerce")
+        if t.notna().any():
+            return (t - t.iloc[0]).dt.total_seconds()
+
+    # Need a time column
+    if not time_col or time_col not in d.columns:
+        return pd.Series(np.zeros(len(d)), index=d.index, dtype="float64")
+    raw = d[time_col]
+
+    # Parse to seconds.
+    # Neware exports can mix numeric seconds and timedelta-like strings (especially in demo packs).
+    # Instead of switching wholesale to timedelta parsing, combine both representations.
+    def _parse_seconds(x: pd.Series) -> pd.Series:
+        sec_num = pd.to_numeric(x, errors="coerce")
+        td = pd.to_timedelta(x.astype(str), errors="coerce")
+        sec_td = td.dt.total_seconds()
+        return sec_num.where(sec_num.notna(), sec_td)
+
+    # Prefer the requested time column, but if it is sparsely populated (common in some demo exports),
+    # fall back to the other time column when it provides better coverage.
+    sec_primary = _parse_seconds(raw)
+    sec = sec_primary
+    if str(time_col).lower() == "total time" and "Time" in d.columns:
+        sec_alt = _parse_seconds(d["Time"])
+        if sec_primary.notna().mean() < 0.80 and sec_alt.notna().mean() > sec_primary.notna().mean():
+            sec = sec_alt
+
+    # Forward fill to handle occasional missing timestamps.
+    sec = sec.ffill().fillna(0.0)
+
+    # 2) If it's already absolute / monotonic (no resets), just return it.
+    # Don't rely on the column name; some exports label step-local time as 'Total Time'.
+    if (sec.diff().fillna(0) >= 0).all():
+        return sec - float(sec.iloc[0])
+
+    # 3) Stitch step-local time using a SAFE grouping key
+    # Use run-length segments so repeating Step_Index values across cycles don't get merged.
+    if "Step_Index" in d.columns:
+        stp = pd.to_numeric(d["Step_Index"], errors="coerce").ffill().fillna(0)
+        boundary = stp.ne(stp.shift())
+        if cycle_col in d.columns:
+            boundary |= d[cycle_col].ne(d[cycle_col].shift())
+        boundary |= sec.diff().fillna(0) < 0
+        boundary |= (sec == 0) & (sec.shift().fillna(0) > 0)
+        gkey = boundary.cumsum().astype(int).astype(str)
+    else:
+        # fallback: run-length segments (cycle/step changes or time reset)
+        boundary = pd.Series(False, index=d.index)
+        if cycle_col in d.columns:
+            boundary |= d[cycle_col].ne(d[cycle_col].shift())
+        if step_col in d.columns:
+            boundary |= d[step_col].astype(str).ne(d[step_col].astype(str).shift())
+        boundary |= sec.diff().fillna(0) < 0
+        boundary |= (sec == 0) & (sec.shift().fillna(0) > 0)
+        gkey = boundary.cumsum().astype(int).astype(str)
+
+    within = sec.groupby(gkey).transform(lambda s: s - s.iloc[0])
+
+    # stable order of groups (by first appearance)
+    _, first_idx = np.unique(gkey.to_numpy(), return_index=True)
+    ordered_groups = gkey.iloc[np.sort(first_idx)]
+
+    offsets: Dict[str, float] = {}
+    total = 0.0
+    for grp in ordered_groups:
+        offsets[grp] = total
+        w = within[gkey == grp].dropna()
+        dur = float(w.max()) if not w.empty else 0.0
+
+        # add one typical dt to avoid boundary duplicates
+        sg = sec[gkey == grp].dropna()
+        dt = float(sg.diff().median()) if len(sg) > 1 else 0.0
+        if not np.isfinite(dt) or dt < 0:
+            dt = 0.0
+
+        total += dur + dt
+
+    stitched = within + gkey.map(offsets).astype(float)
+    return stitched - float(stitched.iloc[0])
+
+def auto_rotate_xticks(fig, ax, rotation=45, ha="right", pad_px=2):
+    """
+    Keep x tick labels horizontal unless they overlap or are clipped.
+    Returns True if it rotated.
+    """
+    # Ensure text positions/sizes are finalized
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    labels = [t for t in ax.get_xticklabels() if t.get_text()]
+    if not labels:
+        return False
+
+    bboxes = [t.get_window_extent(renderer=renderer) for t in labels]
+    bboxes = sorted(bboxes, key=lambda b: b.x0)
+
+    # Overlap check (adjacent bboxes)
+    overlap = any(bboxes[i].x1 + pad_px > bboxes[i + 1].x0 for i in range(len(bboxes) - 1))
+
+    # Clipping check (label extends beyond axes)
+    ax_bb = ax.get_window_extent(renderer=renderer)
+    clipped = any(b.x0 < ax_bb.x0 or b.x1 > ax_bb.x1 for b in bboxes)
+
+    if overlap or clipped:
+        for t in ax.get_xticklabels():
+            t.set_rotation(rotation)
+            t.set_ha(ha)
+        fig.tight_layout()
+        return True
+
+    return False
+
+def insert_line_breaks_vq(df: pd.DataFrame, cap_col: str, v_col: str) -> pd.DataFrame:
+    if df.empty or cap_col not in df.columns or v_col not in df.columns:
+        return df
+    d = df.reset_index(drop=True).copy()
+    cap = pd.to_numeric(d[cap_col], errors="coerce").fillna(0)
+    idxs = cap[(cap.shift(-1) == 0) & (cap > 0)].index.tolist()
+    if not idxs:
+        return d
+    pieces, last = [], 0
+    for i in idxs:
+        pieces.append(d.iloc[last:i + 1])
+        nan_row = {c: (np.nan if c in [cap_col, v_col] else d.iloc[i].get(c)) for c in d.columns}
+        pieces.append(pd.DataFrame([nan_row]))
+        last = i + 1
+    pieces.append(d.iloc[last:])
+    return _concat_nonempty(pieces)
+
+def compute_ce(df: pd.DataFrame, cell_type: str = "cathode") -> pd.DataFrame:
+    if "Cycle Index" not in df.columns:
+        return pd.DataFrame()
+    sc_chg = "Chg. Spec. Cap.(mAh/g)" if "Chg. Spec. Cap.(mAh/g)" in df.columns else None
+    sc_dch = "DChg. Spec. Cap.(mAh/g)" if "DChg. Spec. Cap.(mAh/g)" in df.columns else None
+    sc_any = "Spec. Cap.(mAh/g)" if "Spec. Cap.(mAh/g)" in df.columns else None
+    cap_mAh = "Capacity(mAh)" if "Capacity(mAh)" in df.columns else None
+    has_step = "Step Type" in df.columns
+
+    out = []
+    for c in pd.unique(df["Cycle Index"].dropna()):
+        sub = df[df["Cycle Index"] == c]
+        q_chg = np.nan
+        q_dch = np.nan
+        if sc_chg and sc_dch:
+            q_chg = pd.to_numeric(sub[sc_chg], errors="coerce").max()
+            q_dch = pd.to_numeric(sub[sc_dch], errors="coerce").max()
+        elif sc_any and has_step:
+            chg = sub[sub["Step Type"].str.contains("Chg", na=False)].get(sc_any)
+            dch = sub[sub["Step Type"].str.contains("DChg", na=False)].get(sc_any)
+            q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
+            q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
+        elif cap_mAh and has_step:
+            chg = sub[sub["Step Type"].str.contains("Chg", na=False)].get(cap_mAh)
+            dch = sub[sub["Step Type"].str.contains("DChg", na=False)].get(cap_mAh)
+            q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
+            q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
+        elif cap_mAh:
+            q_chg = pd.to_numeric(sub.get(cap_mAh), errors="coerce").max()
+            q_dch = q_chg
+
+        if pd.isna(q_chg) or pd.isna(q_dch) or q_dch == 0 or q_chg == 0:
+            ce = np.nan
+        else:
+            ce = (q_dch / q_chg * 100.0) if cell_type == "cathode" else (q_chg / q_dch * 100.0)
+        out.append({"cycle": c, "ce": ce, "q_chg": q_chg, "q_dch": q_dch})
+    return pd.DataFrame(out).sort_values("cycle")
+
+def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
+    cols = {c.lower(): c for c in columns}
+    def pick(*names):
+        for n in names:
+            if n.lower() in cols:
+                return cols[n.lower()]
+        return None
+    return {
+        "time": pick("Total Time", "Time"),
+        "voltage": pick("Voltage(V)"),
+        "capacity": pick("Spec. Cap.(mAh/g)", "Capacity(mAh)"),
+        "cycle": pick("Cycle Index"),
+        "step": pick("Step Type"),
+    }
+
+
 
 def add_ppt_download(fig, filename_base: str, *, show_grid: bool = True):
     buf = io.BytesIO()
@@ -1247,9 +2043,11 @@ with st.sidebar.form("upload_form", clear_on_submit=False):
 # Provide an easy way to clear state
 top_l, top_r = st.columns([6, 1])
 with top_r:
+    st.toggle("⚡ Dynamic hover", value=st.session_state.get("dynamic_hover_mode", False), key="dynamic_hover_mode")
+
     if "parsed_by_file" in st.session_state:
         if st.button("🧹 Reset", key="clear_parsed_main"):
-            for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files","demo_loaded"]:
+            for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files", "demo_loaded", "color_overrides_file", "color_overrides_family"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -1374,10 +2172,116 @@ with st.sidebar.expander("Color mode", expanded=True):
 color_map_file = {src: palette[i % len(palette)] for i, src in enumerate(files_all)}
 color_map_fam  = {fam: palette[i % len(palette)] for i, fam in enumerate(families_in_data)}
 
+# ----------------------------
+# Color overrides (optional)
+# ----------------------------
+if "color_overrides_file" not in st.session_state:
+    st.session_state["color_overrides_file"] = {}
+if "color_overrides_family" not in st.session_state:
+    st.session_state["color_overrides_family"] = {}
+
+# Drop overrides that don't exist in the current upload set (keeps things tidy)
+try:
+    st.session_state["color_overrides_file"] = {
+        k: v for k, v in st.session_state["color_overrides_file"].items() if k in files_all
+    }
+    st.session_state["color_overrides_family"] = {
+        k: v for k, v in st.session_state["color_overrides_family"].items() if k in families_in_data
+    }
+except Exception:
+    pass
+
+def _key10(s: str) -> str:
+    return hashlib.md5(str(s).encode("utf-8")).hexdigest()[:10]
+
+with st.sidebar.expander("🎨 Color overrides", expanded=False):
+    st.caption("Override palette colors for specific traces (optional). Overrides are applied when their scope matches the active color mode.")
+
+    default_scope = 0 if color_mode_global == "Per file" else 1
+    override_scope = st.radio(
+        "Override scope",
+        ["File", "Family"],
+        index=default_scope,
+        horizontal=True,
+        key="override_scope",
+    )
+
+    if (override_scope == "File" and color_mode_global != "Per file") or (override_scope == "Family" and color_mode_global == "Per file"):
+        st.warning("Your current **Color by** mode is different. Switch **Color mode** to match this override scope to see the overrides applied.")
+
+    if override_scope == "File":
+        items = selected_files[:]  # only selected traces to keep the UI short
+        if not items:
+            st.caption("Select at least one file to enable file overrides.")
+        else:
+            target = st.selectbox("Select file", items, key="override_file_target")
+            base = color_map_file.get(target, palette[0])
+            current = st.session_state["color_overrides_file"].get(target, base)
+
+            picker_key = f"override_file_color__{_key10(target)}"
+            picked = st.color_picker("Pick color", value=current, key=picker_key)
+
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                if st.button("Apply", key="override_file_apply"):
+                    st.session_state["color_overrides_file"][target] = picked
+                    st.success("Applied file override.")
+            with b2:
+                if st.button("Reset this", key="override_file_reset_one"):
+                    st.session_state["color_overrides_file"].pop(target, None)
+                    st.info("Cleared file override.")
+            with b3:
+                if st.button("Reset all", key="override_file_reset_all"):
+                    st.session_state["color_overrides_file"].clear()
+                    st.info("Cleared all file overrides.")
+
+            if target in st.session_state["color_overrides_file"]:
+                st.caption(f"Active override: `{target}` → `{st.session_state['color_overrides_file'][target]}`")
+            else:
+                st.caption(f"No override set for `{target}` (using palette: `{base}`).")
+
+    else:
+        items = families_in_data[:]
+        if not items:
+            st.caption("No filename families detected.")
+        else:
+            target = st.selectbox("Select family", items, key="override_family_target")
+            base = color_map_fam.get(target, palette[0])
+            current = st.session_state["color_overrides_family"].get(target, base)
+
+            picker_key = f"override_family_color__{_key10(target)}"
+            picked = st.color_picker("Pick color", value=current, key=picker_key)
+
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                if st.button("Apply", key="override_family_apply"):
+                    st.session_state["color_overrides_family"][target] = picked
+                    st.success("Applied family override.")
+            with b2:
+                if st.button("Reset this", key="override_family_reset_one"):
+                    st.session_state["color_overrides_family"].pop(target, None)
+                    st.info("Cleared family override.")
+            with b3:
+                if st.button("Reset all", key="override_family_reset_all"):
+                    st.session_state["color_overrides_family"].clear()
+                    st.info("Cleared all family overrides.")
+
+            if target in st.session_state["color_overrides_family"]:
+                st.caption(f"Active override: `{target}` → `{st.session_state['color_overrides_family'][target]}`")
+            else:
+                st.caption(f"No override set for `{target}` (using palette: `{base}`).")
+
+# Effective color maps (palette + overrides)
+color_map_file_eff = dict(color_map_file)
+color_map_file_eff.update(st.session_state.get("color_overrides_file", {}))
+
+color_map_fam_eff = dict(color_map_fam)
+color_map_fam_eff.update(st.session_state.get("color_overrides_family", {}))
+
 def color_for_src(src: str) -> str:
     if color_mode_global == "Per file":
-        return color_map_file.get(src, palette[0])
-    return color_map_fam.get(family_from_filename(src), palette[0])
+        return color_map_file_eff.get(src, palette[0])
+    return color_map_fam_eff.get(family_from_filename(src), palette[0])
 
 # ----------------------------
 # Utility: get selected frames
@@ -1684,9 +2588,60 @@ if view == "Voltage–Time":
         fig_vt.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         fig_vt.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-    apply_preli_style(fig_vt,base=BASE_THEME,show_grid=show_grid_global)  
+    apply_preli_style(fig_vt,base=BASE_THEME,show_grid=show_grid_global)  # <-- on-screen adapts to Streamlit theme
+
+    game_hover = st.session_state.get("dynamic_hover_mode", False)
+    if game_hover:
+        traces_payload: List[Dict[str, object]] = []
+        max_pts = 60000
+        for tr in fig_vt.data:
+            try:
+                x = np.asarray(tr.x, dtype="float64")
+                y = np.asarray(tr.y, dtype="float64")
+            except Exception:
+                continue
+            msk = np.isfinite(x) & np.isfinite(y)
+            x = x[msk]
+            y = y[msk]
+            if x.size == 0:
+                continue
+            xd, yd = _downsample_xy(x, y, int(max_pts))
+            color = None
+            try:
+                color = tr.line.color
+            except Exception:
+                color = None
+            name = getattr(tr, "name", "trace")
+            group = family_from_filename(name) if (color_mode_global == "Filename family") else name
+            traces_payload.append({
+                "name": name,
+                "group": group,
+                "x": xd.tolist(),
+                "y": yd.tolist(),
+                "color": color or "#1f77b4",
+                "width": float(line_width),
+                "opacity": 0.85,
+            })
+
+        st.caption("")
+        render_game_hover_plot(
+            traces_payload,
+            [],
+            base=BASE_THEME,
+            show_grid=show_grid_global,
+            x_title="Time (hours)" if unit=="Hours" else "Time (minutes)" if unit=="Minutes" else "Time (seconds)",
+            y_title=vcol,
+            height=560,
+        )
+
+        with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
+            st.plotly_chart(fig_vt, width="stretch", config=CAMERA_CFG)
+
+        add_ppt_download(fig_vt, filename_base="voltage_time")
+        st.stop()
+
     st.plotly_chart(fig_vt, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_vt, filename_base="voltage_time")  
+    add_ppt_download(fig_vt, filename_base="voltage_time")
     st.stop()
 
 # ----------------------------
@@ -1731,6 +2686,17 @@ if view == "Voltage–Capacity":
         else:
             rng = None
 
+    game_hover_vq = st.session_state.get("dynamic_hover_mode", False)
+
+    # Tooltip branch selection to avoid charge/discharge ambiguity at intersections
+    hover_role_vq = "discharge"
+    if game_hover_vq:
+        _sel = st.radio("Tooltip values from", ["Discharge", "Charge"], index=0, horizontal=True, key="vq_hover_role")
+        hover_role_vq = "discharge" if _sel == "Discharge" else "charge"
+
+    max_pts = 60000
+    traces_payload: List[Dict[str, object]] = []
+
     fig_vq = go.Figure()
     for src in selected_files:
         df = parsed_by_file[src]
@@ -1759,6 +2725,62 @@ if view == "Voltage–Capacity":
             marker=dict(size=marker_size),
         ))
 
+        if game_hover_vq:
+            # Build separate hover traces for discharge/charge so the tooltip can be restricted
+            cur_col = None
+            for cand in ["Current(mA)", "Current (mA)", "Current(A)", "Current (A)"]:
+                if cand in s.columns:
+                    cur_col = cand
+                    break
+            step_col = "Step Type" if "Step Type" in s.columns else None
+
+            def _split_charge_discharge(df_in: pd.DataFrame):
+                if df_in is None or df_in.empty:
+                    return (df_in.iloc[0:0].copy(), df_in.iloc[0:0].copy())
+                if cur_col:
+                    cur = pd.to_numeric(df_in[cur_col], errors="coerce")
+                    chg_df = df_in[cur > 0].copy()
+                    dch_df = df_in[cur < 0].copy()
+                    return chg_df, dch_df
+                if step_col:
+                    stp = df_in[step_col].astype(str).str.lower()
+                    dch_mask = stp.str.contains("dchg") | stp.str.contains("disch")
+                    chg_mask = stp.str.contains("chg") & ~dch_mask
+                    return (df_in[chg_mask].copy(), df_in[dch_mask].copy())
+                # fallback: can't split, treat everything as discharge
+                return (df_in.iloc[0:0].copy(), df_in.copy())
+
+            chg_df, dch_df = _split_charge_discharge(s)
+            group_name = (family_from_filename(src) if color_mode_global == "Filename family" else pretty_src(src))
+            base_name = pretty_src(src)
+            for role, bdf, showleg in [("discharge", dch_df, True), ("charge", chg_df, False)]:
+                if bdf is None or bdf.dropna(subset=[ccol, vcol]).empty:
+                    continue
+                cols_b = [ccol, vcol, "__file"]
+                if cyc_col and cyc_col in bdf.columns:
+                    cols_b.append(cyc_col)
+                if step_col and step_col in bdf.columns:
+                    cols_b.append(step_col)
+                if cur_col and cur_col in bdf.columns:
+                    cols_b.append(cur_col)
+                plot_b = insert_line_breaks_vq(bdf[cols_b], cap_col=ccol, v_col=vcol)
+                x = pd.to_numeric(plot_b[ccol], errors="coerce").to_numpy(dtype="float64")
+                y = pd.to_numeric(plot_b[vcol], errors="coerce").to_numpy(dtype="float64")
+                xd, yd = _downsample_xy(x, y, int(max_pts))
+                op = 0.85 if role == hover_role_vq else 0.28
+                traces_payload.append({
+                    "name": base_name,
+                    "group": group_name,
+                    "legendgroup": group_name,
+                    "showlegend": bool(showleg),
+                    "role": role,
+                    "x": xd.tolist(),
+                    "y": yd.tolist(),
+                    "color": color_for_src(src),
+                    "width": float(line_width),
+                    "opacity": float(op),
+                })
+
     x_label = f"{ccol}" if "mAh/g" in ccol else ccol
     fig_vq.update_layout(
         template="plotly_white",
@@ -1771,8 +2793,30 @@ if view == "Voltage–Capacity":
         fig_vq.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
     apply_preli_style(fig_vq, base=BASE_THEME, show_grid=show_grid_global)   # <-- on-screen adapts to Streamlit theme
+
+    x_label = f"{ccol}" if "mAh/g" in ccol else ccol
+
+    if game_hover_vq:
+        st.caption("")
+        render_game_hover_plot(
+            traces_payload,
+            [],
+            base=BASE_THEME,
+            show_grid=show_grid_global,
+            x_title=x_label,
+            y_title=vcol,
+            hover_role=hover_role_vq,
+            height=560,
+        )
+
+        with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
+            st.plotly_chart(fig_vq, width="stretch", config=CAMERA_CFG)
+
+        add_ppt_download(fig_vq, filename_base="voltage_capacity")
+        st.stop()
+
     st.plotly_chart(fig_vq, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_vq, filename_base="voltage_capacity")  # <-- exports light copy
+    add_ppt_download(fig_vq, filename_base="voltage_capacity")
     st.stop()
 
 
@@ -2021,6 +3065,69 @@ if view == "dQ/dV":
         fig.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
     apply_preli_style(fig, base=BASE_THEME, show_grid=show_grid_global)
+
+    game_hover_dqdv = st.session_state.get("dynamic_hover_mode", False)
+    hover_role_dqdv = "both"
+    if game_hover_dqdv:
+        _sel = st.radio("Tooltip values from", ["Both", "Discharge", "Charge"], index=0, horizontal=True, key="dqdv_hover_role")
+        hover_role_dqdv = _sel.lower()
+
+        traces_payload: List[Dict[str, object]] = []
+        max_pts = 60000
+        for tr in fig.data:
+            try:
+                x = np.asarray(tr.x, dtype="float64")
+                y = np.asarray(tr.y, dtype="float64")
+            except Exception:
+                continue
+            msk = np.isfinite(x) & np.isfinite(y)
+            x = x[msk]
+            y = y[msk]
+            if x.size == 0:
+                continue
+            xd, yd = _downsample_xy(x, y, int(max_pts))
+            color = None
+            try:
+                color = tr.line.color
+            except Exception:
+                color = None
+            name = getattr(tr, "name", "trace")
+            group = getattr(tr, "legendgroup", None) or name
+            showleg = getattr(tr, "showlegend", True)
+            role = "charge" if (showleg is not False) else "discharge"
+            op = 0.85
+            if hover_role_dqdv != "both":
+                op = 0.85 if role == hover_role_dqdv else 0.28
+            traces_payload.append({
+                "name": name,
+                "group": group,
+                "legendgroup": group,
+                "showlegend": bool(showleg),
+                "role": role,
+                "x": xd.tolist(),
+                "y": yd.tolist(),
+                "color": color or "#1f77b4",
+                "width": float(line_width),
+                "opacity": float(op),
+            })
+
+        st.caption("")
+        render_game_hover_plot(
+            traces_payload,
+            [],
+            base=BASE_THEME,
+            show_grid=show_grid_global,
+            x_title=vcol,
+            y_title="dQ/dV",
+            hover_role=hover_role_dqdv,
+            height=560,
+        )
+
+        with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
+            st.plotly_chart(fig, width="stretch", config=CAMERA_CFG)
+        add_ppt_download(fig, filename_base="dqdv")
+        st.stop()
+
     st.plotly_chart(fig, width="stretch", config=CAMERA_CFG)
     add_ppt_download(fig, filename_base="dqdv")
     st.stop()
@@ -2077,8 +3184,58 @@ if view == "Capacity vs Cycle":
     fig_cap.update_yaxes(title_text=y_label, showgrid=show_grid_global, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
     apply_preli_style(fig_cap, base=BASE_THEME, show_grid=show_grid_global)   # <-- on-screen adapts to Streamlit theme
+
+    game_hover_cap = st.session_state.get("dynamic_hover_mode", False)
+    if game_hover_cap:
+        traces_payload: List[Dict[str, object]] = []
+        max_pts = 10000
+        for tr in fig_cap.data:
+            try:
+                x = np.asarray(tr.x, dtype="float64")
+                y = np.asarray(tr.y, dtype="float64")
+            except Exception:
+                continue
+            msk = np.isfinite(x) & np.isfinite(y)
+            x = x[msk]
+            y = y[msk]
+            if x.size == 0:
+                continue
+            xd, yd = _downsample_xy(x, y, int(max_pts))
+            color = None
+            try:
+                color = tr.line.color
+            except Exception:
+                color = None
+            name = getattr(tr, "name", "trace")
+            group = family_from_filename(name) if (color_mode_global == "Filename family") else name
+            traces_payload.append({
+                "name": name,
+                "group": group,
+                "x": xd.tolist(),
+                "y": yd.tolist(),
+                "color": color or "#1f77b4",
+                "width": float(line_width),
+                "opacity": 0.85,
+            })
+
+        st.caption("")
+        render_game_hover_plot(
+            traces_payload,
+            [],
+            base=BASE_THEME,
+            show_grid=show_grid_global,
+            x_title="Cycle",
+            y_title=y_label,
+            height=560,
+        )
+
+        with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
+            st.plotly_chart(fig_cap, width="stretch", config=CAMERA_CFG)
+        add_ppt_download(fig_cap, filename_base="capacity_vs_cycle")
+        st.stop()
+
     st.plotly_chart(fig_cap, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_cap, filename_base="capacity_vs_cycle")  # <-- exports light copy
+    add_ppt_download(fig_cap, filename_base="capacity_vs_cycle")
     st.stop()
 
 # ----------------------------
@@ -2134,27 +3291,113 @@ if view == "Capacity & CE":
                 marker=dict(size=marker_size, symbol="diamond", color=c),
             ), secondary_y=True)
 
+    
     y_left = "Specific capacity (mAh/g)" if "mAh/g" in (cap_col or "") else "Capacity (mAh)"
-    show_grid = st.checkbox("Show grid", value=True, key="ce_show_grid")
-    grid_side = st.radio("Y-grid on", ["left", "right", "both", "none"], index=0, horizontal=True)
+    game_hover_ce = st.session_state.get("dynamic_hover_mode", False)
+
+    # Local grid controls for this plot (so they don't get overridden by global styling)
+    if game_hover_ce:
+        # Keep UI clean in Dynamic Hover mode; follow global grid toggle for consistency
+        show_grid = bool(show_grid_global)
+        grid_side = "left"
+    else:
+        show_grid = st.checkbox("Show grid", value=True, key="ce_show_grid")
+        grid_side = st.radio("Y-grid on", ["left", "right", "both", "none"], index=0, horizontal=True)
 
     fig_ce.update_yaxes(title_text=y_left, secondary_y=False)
     fig_ce.update_yaxes(title_text="CE (%)", range=[90, 105], secondary_y=True)
     fig_ce.update_xaxes(title_text="Cycle")
     fig_ce.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02))
 
-    if show_grid and grid_side != "none":
-        fig_ce.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
-        fig_ce.update_yaxes(showgrid=(grid_side in ["left", "both"]), gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5, secondary_y=False)
-        fig_ce.update_yaxes(showgrid=(grid_side in ["right", "both"]), gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5, secondary_y=True)
-    else:
-        fig_ce.update_xaxes(showgrid=False)
-        fig_ce.update_yaxes(showgrid=False, secondary_y=False)
-        fig_ce.update_yaxes(showgrid=False, secondary_y=True)
+    # Apply base styling first (fonts, background, axis lines) without clobbering our per-axis grid settings
+    apply_preli_style(fig_ce, base=BASE_THEME, show_grid=True)
 
-    apply_preli_style(fig_ce, base=BASE_THEME, show_grid=show_grid_global)   
+    # Then apply grid settings (including "left/right/both/none") so the controls work as expected.
+    grid_color = "rgba(255,255,255,0.18)" if (BASE_THEME == "dark") else NV_COLORDICT["nv_gray3"]
+    x_grid = bool(show_grid)
+    y_left_grid = bool(show_grid) and (grid_side in ["left", "both"])
+    y_right_grid = bool(show_grid) and (grid_side in ["right", "both"])
+
+    fig_ce.update_xaxes(showgrid=x_grid, gridcolor=grid_color, gridwidth=0.5)
+    fig_ce.update_yaxes(showgrid=y_left_grid, gridcolor=grid_color, gridwidth=0.5, secondary_y=False)
+    fig_ce.update_yaxes(showgrid=y_right_grid, gridcolor=grid_color, gridwidth=0.5, secondary_y=True)
+
+    hover_metric = "Capacity"
+    if game_hover_ce:
+        hover_metric = st.radio("Hover shows", ["Capacity", "CE"], index=0, horizontal=True, key="ce_hover_metric")
+
+    if game_hover_ce:
+        traces_cap_payload: List[Dict[str, object]] = []
+        traces_ce_payload: List[Dict[str, object]] = []
+        max_pts = 40000
+        for tr in fig_ce.data:
+            name = getattr(tr, "name", "trace")
+            is_ce = str(name).startswith("CE —")
+            is_cap = str(name).startswith("Cap —")
+            if not (is_ce or is_cap):
+                continue
+            try:
+                x = np.asarray(tr.x, dtype="float64")
+                y = np.asarray(tr.y, dtype="float64")
+            except Exception:
+                continue
+            msk = np.isfinite(x) & np.isfinite(y)
+            x = x[msk]
+            y = y[msk]
+            if x.size == 0:
+                continue
+            xd, yd = _downsample_xy(x, y, int(max_pts))
+            color = None
+            try:
+                color = tr.line.color
+            except Exception:
+                color = None
+            base_name = str(name).replace("Cap — ", "").replace("CE — ", "")
+            group = family_from_filename(base_name) if (color_mode_global == "Filename family") else base_name
+            payload = {
+                "name": base_name,
+                "group": group,
+                "x": xd.tolist(),
+                "y": yd.tolist(),
+                "color": color or "#1f77b4",
+                "width": float(line_width),
+                "opacity": 0.85,
+            }
+            if is_cap:
+                traces_cap_payload.append(payload)
+            else:
+                traces_ce_payload.append(payload)
+
+        st.caption("")
+        if hover_metric == "Capacity":
+            render_game_hover_plot(
+                traces_cap_payload,
+                [],
+                base=BASE_THEME,
+                show_grid=show_grid,
+                x_title="Cycle",
+                y_title=y_left,
+                height=560,
+            )
+        else:
+            render_game_hover_plot(
+                traces_ce_payload,
+                [],
+                base=BASE_THEME,
+                show_grid=show_grid,
+                x_title="Cycle",
+                y_title="CE (%)",
+                y_range=(90, 105),
+                height=560,
+            )
+
+        with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
+            st.plotly_chart(fig_ce, width="stretch", config=CAMERA_CFG)
+        add_ppt_download(fig_ce, filename_base="ce_and_capacity")
+        st.stop()
+
     st.plotly_chart(fig_ce, width="stretch", config=CAMERA_CFG)
-    add_ppt_download(fig_ce, filename_base="ce_and_capacity",)  
+    add_ppt_download(fig_ce, filename_base="ce_and_capacity")
     st.stop()
 # ----------------------------
 # DCIR
@@ -2570,7 +3813,7 @@ if view == "Capacity Fade Boxplot":
 
     # Use the same color mapping as the rest of the app
     color_key = "File" if color_mode_global == "Per file" else "Group"
-    color_map = color_map_file if color_key == "File" else color_map_fam
+    color_map = color_map_file_eff if color_key == "File" else color_map_fam_eff
 
     # Y label
     if y_metric == "CE (%)":
