@@ -2043,8 +2043,8 @@ with st.sidebar.form("upload_form", clear_on_submit=False):
     parse_now = st.form_submit_button("🚀 **launch files**")
 
 # Provide an easy way to clear state
-
-
+top_l, top_r = st.columns([6, 1])
+with top_r:
     if "parsed_by_file" in st.session_state:
         if st.button("🧹 Reset", key="clear_parsed_main"):
             for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files", "demo_loaded", "color_overrides_file", "color_overrides_family"]:
