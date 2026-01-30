@@ -2100,16 +2100,17 @@ if FOCUS_MODE:
             unsafe_allow_html=True,
         )
 else:
-    c1, c2, c3 = st.columns([1, 1, 1])
+    c1, c2, c3 = st.columns([1, 1, 0.5])
     with c2:
         if logo_path.exists():
             st.image(str(logo_path))
         else:
             st.caption(f"Logo missing: {logo_path.name}")
-
+    with c3: st.toggle("⚡ Dynamic hover", value=st.session_state.get("dynamic_hover_mode", False), key="dynamic_hover_mode")
     st.title("🔋 BATTERY CELL DATA — VISUALIZER 📈")
     st.caption("::::::: Built by the Preli team ::::::::")
 
+   
 
 
 # ----------------------------
@@ -2126,8 +2127,7 @@ with st.sidebar.form("upload_form", clear_on_submit=False):
 # Provide an easy way to clear state
 top_l, top_r = st.columns([6, 1])
 with top_r:
-    st.toggle("⚡ Dynamic hover", value=st.session_state.get("dynamic_hover_mode", False), key="dynamic_hover_mode")
-
+    
     if "parsed_by_file" in st.session_state:
         if st.button("🧹 Reset", key="clear_parsed_main"):
             for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files", "demo_loaded", "color_overrides_file", "color_overrides_family", "dynamic_hover_mode"]:
