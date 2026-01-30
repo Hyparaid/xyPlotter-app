@@ -2103,7 +2103,7 @@ else:
     c1, c2, c3 = st.columns([1, 2, 0.5])
     with c2:
         if logo_path.exists():
-            st.image(str(logo_path), width=300)
+            st.image(str(logo_path), width=350)
         else:
             st.caption(f"Logo missing: {logo_path.name}")
     with c3: st.toggle("⚡ Dynamic hover", value=st.session_state.get("dynamic_hover_mode", False), key="dynamic_hover_mode")
