@@ -57,6 +57,42 @@ HERE = Path(__file__).parent
 _theme = st_theme(key="app_theme") or {}
 BASE_THEME = _theme.get("base")
 
+
+# ----------------------------
+# Focus mode (for Dynamic Hover)
+# ----------------------------
+# When Dynamic Hover is enabled, we switch to a compact header and maximize plotting area.
+FOCUS_MODE = bool(st.session_state.get("dynamic_hover_mode", False))
+
+if FOCUS_MODE:
+    st.markdown(
+        """
+        <style>
+          /* Hide sidebar + collapse control to maximize plot width */
+          section[data-testid="stSidebar"] { display: none; }
+          div[data-testid="collapsedControl"] { display: none; }
+
+          /* Tighten overall page padding for a more "full screen" feel */
+          div.block-container { padding-top: 0.8rem; padding-bottom: 0.8rem; }
+
+          /* Reduce extra blank space Streamlit adds above the first element */
+          header[data-testid="stHeader"] { height: 0.25rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# Plotly config: keep export settings, but make nav tools feel "pro" in focus mode
+PLOT_CFG = dict(CAMERA_CFG)
+if FOCUS_MODE:
+    PLOT_CFG.update(
+        {
+            "displayModeBar": True,
+            "scrollZoom": True,
+            "displaylogo": False,
+            "responsive": True,
+        }
+    )
 if BASE_THEME not in ("light", "dark"):
     BASE_THEME = st.get_option("theme.base") or "light"
 
@@ -307,25 +343,49 @@ def render_game_hover_plot(
     html = f"""
 <div id="{div_id}_wrap" style="position:relative;">
   <style>
+    /* X-pill: auto light/dark via browser preference */
+    :root{{
+      --xpill-bg: rgba(255,255,255,0.92);
+      --xpill-border: rgba(0,0,0,0.10);
+      --xpill-shadow: rgba(0,0,0,0.10);
+      --xpill-fg: rgba(0,0,0,0.88);
+    }}
+    @media (prefers-color-scheme: dark){{
+      :root{{
+        --xpill-bg: rgba(0,0,0,0.25);
+        --xpill-border: rgba(255,255,255,0.18);
+        --xpill-shadow: rgba(0,0,0,0.35);
+        --xpill-fg: rgba(255,255,255,0.92);
+      }}
+    }}
+    .xpill-glass{{
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }}
+
     /* Hide Plotly default hover labels/points but KEEP hoverlayer so spike lines remain */
     #{div_id} .hoverlayer .hovertext {{ display: none !important; }}
     #{div_id} .hoverlayer .hoverpoints {{ display: none !important; }}
+
+    /* Nudge Plotly modebar down a bit so it doesn't collide with the x-pill */
+    #{div_id} .modebar{{ top: 18px !important; }}
   </style>
   <div id="{div_id}" style="width:100%;height:{height}px;"></div>
 
   <!-- x-value pill at the top, centered on cursor line -->
-  <div id="{div_id}_xpill" style="
+  <div id="{div_id}_xpill" class="xpill-glass" style="
       position:absolute; top:0; left:0;
-      transform: translate(0%,-50%);
+      transform: translateX(-50%);
       padding: 6px 10px;
       border-radius: 999px;
-      border: 1px solid rgba(255,255,255,0.25);
-      background: rgba(255,255,255,0.16);
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-      color: {fg};
+      background: var(--xpill-bg);
+      border: 1px solid var(--xpill-border);
+      box-shadow: 0 10px 24px var(--xpill-shadow);
+      color: var(--xpill-fg);
       font-family: Arial, sans-serif;
       font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
       font-variant-numeric: tabular-nums;
       pointer-events:none;
       display:none;
@@ -474,9 +534,12 @@ def render_game_hover_plot(
   }};
 
   const config = {{
-    displayModeBar: false,
+    displayModeBar: true,
+    displaylogo: false,
     responsive: true,
-    scrollZoom: true
+    scrollZoom: true,
+    doubleClick: "reset",
+    modeBarButtonsToRemove: ["lasso2d", "select2d"],
   }};
 
   const tracesAll = [...lineTraces, ...(obj.length ? [objTrace] : [])];
@@ -2018,17 +2081,35 @@ LOGO_DARK_PATH  = HERE / "logo_dark.png"
 IS_DARK = (BASE_THEME == "dark")
 logo_path = LOGO_DARK_PATH if IS_DARK else LOGO_LIGHT_PATH
 
-c1, c2, c3 = st.columns([1, 2, 0.5])
-with c2:
-    if logo_path.exists():
-        st.image(str(logo_path), width=300)
-    else:
-        st.caption(f"Logo missing: {logo_path.name}")
-with c3:
-    st.toggle("⚡ Dynamic hover", value=st.session_state.get("dynamic_hover_mode", False), key="dynamic_hover_mode")
+if FOCUS_MODE:
+    # Compact header (logo left, minimal vertical space)
+    h_l, h_m, h_r = st.columns([1.4, 7.2, 1.4])
+    with h_l:
+        if logo_path.exists():
+            st.image(str(logo_path), width=140)
+        else:
+            st.caption(f"Logo missing: {logo_path.name}")
+    with h_m:
+        st.markdown(
+            """
+            <div style="margin-top:0.15rem; line-height:1.1;">
+              <div style="font-size:20px; font-weight:800;">🔋 BATTERY CELL DATA — VISUALIZER</div>
+              <div style="font-size:12px; opacity:0.75;">Built by the Preli team</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+else:
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c2:
+        if logo_path.exists():
+            st.image(str(logo_path))
+        else:
+            st.caption(f"Logo missing: {logo_path.name}")
 
-st.title("🔋 BATTERY CELL DATA — VISUALIZER 📈")
-st.caption("::::::: Built by the Preli team ::::::::")
+    st.title("🔋 BATTERY CELL DATA — VISUALIZER 📈")
+    st.caption("::::::: Built by the Preli team ::::::::")
+
 
 
 # ----------------------------
@@ -2045,9 +2126,11 @@ with st.sidebar.form("upload_form", clear_on_submit=False):
 # Provide an easy way to clear state
 top_l, top_r = st.columns([6, 1])
 with top_r:
+    st.toggle("⚡ Dynamic hover", value=st.session_state.get("dynamic_hover_mode", False), key="dynamic_hover_mode")
+
     if "parsed_by_file" in st.session_state:
         if st.button("🧹 Reset", key="clear_parsed_main"):
-            for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files", "demo_loaded", "color_overrides_file", "color_overrides_family"]:
+            for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files", "demo_loaded", "color_overrides_file", "color_overrides_family", "dynamic_hover_mode"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -2111,9 +2194,9 @@ if current_upload_names and set(current_upload_names) != set(cached_names) and n
 # Sidebar: options
 # ----------------------------
 
-with st.sidebar.expander("Cell type", expanded=True):
+with st.sidebar.expander("CE options", expanded=True):
     cell_type_sel = st.radio(
-        "select cell type",
+        "Cell type (for CE direction)",
         ["anode", "cathode", "full"],
         index=1,
         horizontal=True,
@@ -2535,7 +2618,7 @@ if view == "XY Builder":
         fig.update_xaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
         fig.update_yaxes(showgrid=True, gridcolor=NV_COLORDICT["nv_gray3"], gridwidth=0.5)
 
-    st.plotly_chart(fig, width="stretch", config=CAMERA_CFG)
+    st.plotly_chart(fig, width="stretch", config=PLOT_CFG)
     st.stop()
 
 # ----------------------------
@@ -2623,7 +2706,6 @@ if view == "Voltage–Time":
                 "opacity": 0.85,
             })
 
-        st.caption("")
         render_game_hover_plot(
             traces_payload,
             [],
@@ -2635,12 +2717,12 @@ if view == "Voltage–Time":
         )
 
         with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
-            st.plotly_chart(fig_vt, width="stretch", config=CAMERA_CFG)
+            st.plotly_chart(fig_vt, width="stretch", config=PLOT_CFG)
 
         add_ppt_download(fig_vt, filename_base="voltage_time")
         st.stop()
 
-    st.plotly_chart(fig_vt, width="stretch", config=CAMERA_CFG)
+    st.plotly_chart(fig_vt, width="stretch", config=PLOT_CFG)
     add_ppt_download(fig_vt, filename_base="voltage_time")
     st.stop()
 
@@ -2797,7 +2879,6 @@ if view == "Voltage–Capacity":
     x_label = f"{ccol}" if "mAh/g" in ccol else ccol
 
     if game_hover_vq:
-        st.caption("")
         render_game_hover_plot(
             traces_payload,
             [],
@@ -2810,12 +2891,12 @@ if view == "Voltage–Capacity":
         )
 
         with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
-            st.plotly_chart(fig_vq, width="stretch", config=CAMERA_CFG)
+            st.plotly_chart(fig_vq, width="stretch", config=PLOT_CFG)
 
         add_ppt_download(fig_vq, filename_base="voltage_capacity")
         st.stop()
 
-    st.plotly_chart(fig_vq, width="stretch", config=CAMERA_CFG)
+    st.plotly_chart(fig_vq, width="stretch", config=PLOT_CFG)
     add_ppt_download(fig_vq, filename_base="voltage_capacity")
     st.stop()
 
@@ -3111,7 +3192,6 @@ if view == "dQ/dV":
                 "opacity": float(op),
             })
 
-        st.caption("")
         render_game_hover_plot(
             traces_payload,
             [],
@@ -3124,11 +3204,11 @@ if view == "dQ/dV":
         )
 
         with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
-            st.plotly_chart(fig, width="stretch", config=CAMERA_CFG)
+            st.plotly_chart(fig, width="stretch", config=PLOT_CFG)
         add_ppt_download(fig, filename_base="dqdv")
         st.stop()
 
-    st.plotly_chart(fig, width="stretch", config=CAMERA_CFG)
+    st.plotly_chart(fig, width="stretch", config=PLOT_CFG)
     add_ppt_download(fig, filename_base="dqdv")
     st.stop()
 
@@ -3218,7 +3298,6 @@ if view == "Capacity vs Cycle":
                 "opacity": 0.85,
             })
 
-        st.caption("")
         render_game_hover_plot(
             traces_payload,
             [],
@@ -3230,11 +3309,11 @@ if view == "Capacity vs Cycle":
         )
 
         with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
-            st.plotly_chart(fig_cap, width="stretch", config=CAMERA_CFG)
+            st.plotly_chart(fig_cap, width="stretch", config=PLOT_CFG)
         add_ppt_download(fig_cap, filename_base="capacity_vs_cycle")
         st.stop()
 
-    st.plotly_chart(fig_cap, width="stretch", config=CAMERA_CFG)
+    st.plotly_chart(fig_cap, width="stretch", config=PLOT_CFG)
     add_ppt_download(fig_cap, filename_base="capacity_vs_cycle")
     st.stop()
 
@@ -3368,7 +3447,6 @@ if view == "Capacity & CE":
             else:
                 traces_ce_payload.append(payload)
 
-        st.caption("")
         if hover_metric == "Capacity":
             render_game_hover_plot(
                 traces_cap_payload,
@@ -3392,11 +3470,11 @@ if view == "Capacity & CE":
             )
 
         with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
-            st.plotly_chart(fig_ce, width="stretch", config=CAMERA_CFG)
+            st.plotly_chart(fig_ce, width="stretch", config=PLOT_CFG)
         add_ppt_download(fig_ce, filename_base="ce_and_capacity")
         st.stop()
 
-    st.plotly_chart(fig_ce, width="stretch", config=CAMERA_CFG)
+    st.plotly_chart(fig_ce, width="stretch", config=PLOT_CFG)
     add_ppt_download(fig_ce, filename_base="ce_and_capacity")
     st.stop()
 # ----------------------------
@@ -3863,7 +3941,7 @@ if view == "Capacity Fade Boxplot":
 )    
 
     apply_preli_style(fig_box, base=BASE_THEME, show_grid=show_grid_global)
-    st.plotly_chart(fig_box, width="stretch", config=CAMERA_CFG)
+    st.plotly_chart(fig_box, width="stretch", config=PLOT_CFG)
     add_ppt_download(fig_box, filename_base=f"capfade_box_{int(start)}_{int(end)}")
     st.stop()
 
