@@ -2100,7 +2100,7 @@ if FOCUS_MODE:
             unsafe_allow_html=True,
         )
 else:
-    c1, c2, c3 = st.columns([1, 1, 0.5])
+    c1, c2, c3 = st.columns([1, 2, 0.5])
     with c2:
         if logo_path.exists():
             st.image(str(logo_path))
