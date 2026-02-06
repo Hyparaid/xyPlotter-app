@@ -2967,6 +2967,8 @@ if view == "dQ/dV":
         return out
 
     fig = go.Figure()
+    # --- dQ/dV export collector ---
+    export_parts = []  # will become one CSV
     any_qcol = None
 
     if mode == "Single cycle (compare files)":
@@ -3020,7 +3022,20 @@ if view == "dQ/dV":
 
             ch_curve = compute_dqdv_segment_df(ch_seg, vcol=vcol, qcol=ch_qcol, opts=opts) if ch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
             dch_curve = compute_dqdv_segment_df(dch_seg, vcol=vcol, qcol=dch_qcol, opts=opts) if dch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
+            # --- collect export data (compare-files mode) ---
+            if not ch_curve.empty:
+                tmp = ch_curve.copy()
+                tmp.insert(0, "Segment", "Charge")
+                tmp.insert(0, "Cycle", int(sel_cycle))
+                tmp.insert(0, "File", pretty_src(src_name))
+                export_parts.append(tmp)
 
+            if not dch_curve.empty:
+                tmp = dch_curve.copy()
+                tmp.insert(0, "Segment", "Discharge")
+                tmp.insert(0, "Cycle", int(sel_cycle))
+                tmp.insert(0, "File", pretty_src(src_name))
+                export_parts.append(tmp)
             color = color_for_src(src_name)
 
             if not ch_curve.empty:
@@ -3102,7 +3117,20 @@ if view == "dQ/dV":
 
             ch_curve = compute_dqdv_segment_df(ch_seg, vcol=vcol, qcol=ch_qcol, opts=opts) if ch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
             dch_curve = compute_dqdv_segment_df(dch_seg, vcol=vcol, qcol=dch_qcol, opts=opts) if dch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
+            # --- collect export data (overlay-cycles mode) ---
+            if not ch_curve.empty:
+                tmp = ch_curve.copy()
+                tmp.insert(0, "Segment", "Charge")
+                tmp.insert(0, "Cycle", int(cyc))
+                tmp.insert(0, "File", pretty_src(src_name))
+                export_parts.append(tmp)
 
+            if not dch_curve.empty:
+                tmp = dch_curve.copy()
+                tmp.insert(0, "Segment", "Discharge")
+                tmp.insert(0, "Cycle", int(cyc))
+                tmp.insert(0, "File", pretty_src(src_name))
+                export_parts.append(tmp)
             color = palette[i % len(palette)] if len(palette) else None
 
             label = f"Cycle {cyc}"
@@ -3205,10 +3233,46 @@ if view == "dQ/dV":
 
         with st.expander("Standard Plotly view (for export / exact styling)", expanded=False):
             st.plotly_chart(fig, width="stretch", config=PLOT_CFG)
+            # --- Export dQ/dV data as CSV ---
+            if export_parts:
+                export_df = pd.concat(export_parts, ignore_index=True)
+
+                # Make column names explicit + stable
+                export_df = export_df.rename(columns={"Voltage": "Voltage(V)", "dQdV": "dQdV"})
+
+                csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+
+                st.download_button(
+                    "⬇️ Download dQ/dV data (CSV)",
+                    data=csv_bytes,
+                    file_name="dqdv_export.csv",
+                    mime="text/csv",
+                    key="dqdv_export_csv",
+                )
+            else:
+                st.caption("No dQ/dV points available to export for this selection.")
         add_ppt_download(fig, filename_base="dqdv")
         st.stop()
 
     st.plotly_chart(fig, width="stretch", config=PLOT_CFG)
+    # --- Export dQ/dV data as CSV ---
+    if export_parts:
+        export_df = pd.concat(export_parts, ignore_index=True)
+
+        # Make column names explicit + stable
+        export_df = export_df.rename(columns={"Voltage": "Voltage(V)", "dQdV": "dQdV"})
+
+        csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            "⬇️ Download dQ/dV data (CSV)",
+            data=csv_bytes,
+            file_name="dqdv_export.csv",
+            mime="text/csv",
+            key="dqdv_export_csv",
+        )
+    else:
+        st.caption("No dQ/dV points available to export for this selection.")
     add_ppt_download(fig, filename_base="dqdv")
     st.stop()
 
