@@ -775,12 +775,17 @@ def pretty_src(src: str) -> str:
     return Path(src).stem
 
 def family_from_filename(name: str) -> str:
-    stem = Path(str(name)).stem.lower()
-    for sep in ["_", "-", " "]:
-        if sep in stem:
-            stem = stem.split(sep)[0]
-            break
-    return re.sub(r"\d+$", "", stem) or stem
+    stem = Path(str(name)).stem.strip()
+
+    if "_" in stem:
+        head, tail = stem.rsplit("_", 1)
+        # Only treat it as a replicate separator if the last token is numeric (e.g., 01, 2, 003)
+        base = head if tail.isdigit() else stem
+    else:
+        base = stem
+
+    base = base.strip(" _-")
+    return base.lower() if base else stem.lower()
 
 def _concat_nonempty(frames: List[pd.DataFrame]) -> pd.DataFrame:
     if not frames:
@@ -1091,13 +1096,7 @@ def add_ppt_download(fig, filename_base: str, *, show_grid: bool = True):
 def pretty_src(src: str) -> str:
     return Path(src).stem
 
-def family_from_filename(name: str) -> str:
-    stem = Path(str(name)).stem.lower()
-    for sep in ["_", "-", " "]:
-        if sep in stem:
-            stem = stem.split(sep)[0]
-            break
-    return re.sub(r"\d+$", "", stem) or stem
+
 
 def _concat_nonempty(frames: List[pd.DataFrame]) -> pd.DataFrame:
     if not frames:
