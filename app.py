@@ -1019,43 +1019,138 @@ def insert_line_breaks_vq(df: pd.DataFrame, cap_col: str, v_col: str) -> pd.Data
     pieces.append(d.iloc[last:])
     return _concat_nonempty(pieces)
 
-def compute_ce(df: pd.DataFrame, cell_type: str = "cathode") -> pd.DataFrame:
+def compute_ce(df: pd.DataFrame, cell_type: str = "cathode", cap_units: str = "auto") -> pd.DataFrame:
+    """Compute per-cycle charge/discharge capacities and Coulombic efficiency.
+
+    Parameters
+    ----------
+    cell_type:
+        "cathode" → CE = q_dch/q_chg * 100 (typical full-cell convention)
+        "anode"   → CE = q_chg/q_dch * 100 (when stripping/plating direction flips)
+    cap_units:
+        "mAh/g", "mAh", or "auto" (auto prefers mAh/g if available).
+    """
     if "Cycle Index" not in df.columns:
         return pd.DataFrame()
+
+    pref = (cap_units or "auto").strip().lower()
+    if pref in ("mah/g", "mahg", "specific", "spec"):
+        pref = "mah/g"
+    elif pref in ("mah", "abs", "absolute"):
+        pref = "mah"
+    else:
+        pref = "auto"
+
+    has_step = "Step Type" in df.columns
+
+    # Active mass (for optional conversion between mAh <-> mAh/g)
+    am_g = None
+    try:
+        am_g = df.attrs.get("active_mass_g", None)
+    except Exception:
+        am_g = None
+    if not isinstance(am_g, (int, float)) or not np.isfinite(am_g) or am_g <= 0:
+        am_g = None
+
+    # Column candidates
     sc_chg = "Chg. Spec. Cap.(mAh/g)" if "Chg. Spec. Cap.(mAh/g)" in df.columns else None
     sc_dch = "DChg. Spec. Cap.(mAh/g)" if "DChg. Spec. Cap.(mAh/g)" in df.columns else None
     sc_any = "Spec. Cap.(mAh/g)" if "Spec. Cap.(mAh/g)" in df.columns else None
+
+    chg_mAh = next((c for c in ["Chg. Cap.(mAh)", "Charge_Capacity(mAh)"] if c in df.columns), None)
+    dch_mAh = next((c for c in ["DChg. Cap.(mAh)", "Discharge_Capacity(mAh)"] if c in df.columns), None)
     cap_mAh = "Capacity(mAh)" if "Capacity(mAh)" in df.columns else None
-    has_step = "Step Type" in df.columns
+
+    def _max_pair(sub: pd.DataFrame, unit: str) -> Tuple[float, float, bool]:
+        q_chg = np.nan
+        q_dch = np.nan
+
+        if unit == "mah/g":
+            if sc_chg and sc_dch:
+                q_chg = pd.to_numeric(sub[sc_chg], errors="coerce").max()
+                q_dch = pd.to_numeric(sub[sc_dch], errors="coerce").max()
+                return q_chg, q_dch, True
+            if sc_any and has_step:
+                chg = sub[sub["Step Type"].astype(str).str.contains("Chg", na=False)].get(sc_any)
+                dch = sub[sub["Step Type"].astype(str).str.contains("DChg", na=False)].get(sc_any)
+                q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
+                q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
+                return q_chg, q_dch, True
+            if sc_any:
+                q = pd.to_numeric(sub.get(sc_any), errors="coerce").max()
+                return q, q, True
+            return np.nan, np.nan, False
+
+        # unit == "mah"
+        if chg_mAh and dch_mAh:
+            q_chg = pd.to_numeric(sub[chg_mAh], errors="coerce").max()
+            q_dch = pd.to_numeric(sub[dch_mAh], errors="coerce").max()
+            return q_chg, q_dch, True
+        if cap_mAh and has_step:
+            chg = sub[sub["Step Type"].astype(str).str.contains("Chg", na=False)].get(cap_mAh)
+            dch = sub[sub["Step Type"].astype(str).str.contains("DChg", na=False)].get(cap_mAh)
+            q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
+            q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
+            return q_chg, q_dch, True
+        if cap_mAh:
+            q = pd.to_numeric(sub.get(cap_mAh), errors="coerce").max()
+            return q, q, True
+        return np.nan, np.nan, False
 
     out = []
     for c in pd.unique(df["Cycle Index"].dropna()):
         sub = df[df["Cycle Index"] == c]
+
+        used_unit = None
         q_chg = np.nan
         q_dch = np.nan
-        if sc_chg and sc_dch:
-            q_chg = pd.to_numeric(sub[sc_chg], errors="coerce").max()
-            q_dch = pd.to_numeric(sub[sc_dch], errors="coerce").max()
-        elif sc_any and has_step:
-            chg = sub[sub["Step Type"].str.contains("Chg", na=False)].get(sc_any)
-            dch = sub[sub["Step Type"].str.contains("DChg", na=False)].get(sc_any)
-            q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
-            q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
-        elif cap_mAh and has_step:
-            chg = sub[sub["Step Type"].str.contains("Chg", na=False)].get(cap_mAh)
-            dch = sub[sub["Step Type"].str.contains("DChg", na=False)].get(cap_mAh)
-            q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
-            q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
-        elif cap_mAh:
-            q_chg = pd.to_numeric(sub.get(cap_mAh), errors="coerce").max()
-            q_dch = q_chg
+
+        if pref == "auto":
+            q_chg, q_dch, ok = _max_pair(sub, "mah/g")
+            if ok and (pd.notna(q_chg) or pd.notna(q_dch)):
+                used_unit = "mAh/g"
+            else:
+                q_chg, q_dch, ok2 = _max_pair(sub, "mah")
+                if ok2 and (pd.notna(q_chg) or pd.notna(q_dch)):
+                    used_unit = "mAh"
+        elif pref == "mah/g":
+            q_chg, q_dch, ok = _max_pair(sub, "mah/g")
+            if ok and (pd.notna(q_chg) or pd.notna(q_dch)):
+                used_unit = "mAh/g"
+            else:
+                q_chg, q_dch, ok2 = _max_pair(sub, "mah")
+                if ok2 and (pd.notna(q_chg) or pd.notna(q_dch)):
+                    # convert to mAh/g if possible
+                    if am_g:
+                        q_chg = (q_chg / am_g) if pd.notna(q_chg) else q_chg
+                        q_dch = (q_dch / am_g) if pd.notna(q_dch) else q_dch
+                        used_unit = "mAh/g"
+                    else:
+                        used_unit = "mAh"
+        else:  # pref == "mah"
+            q_chg, q_dch, ok = _max_pair(sub, "mah")
+            if ok and (pd.notna(q_chg) or pd.notna(q_dch)):
+                used_unit = "mAh"
+            else:
+                q_chg, q_dch, ok2 = _max_pair(sub, "mah/g")
+                if ok2 and (pd.notna(q_chg) or pd.notna(q_dch)):
+                    # convert to mAh if possible
+                    if am_g:
+                        q_chg = (q_chg * am_g) if pd.notna(q_chg) else q_chg
+                        q_dch = (q_dch * am_g) if pd.notna(q_dch) else q_dch
+                        used_unit = "mAh"
+                    else:
+                        used_unit = "mAh/g"
 
         if pd.isna(q_chg) or pd.isna(q_dch) or q_dch == 0 or q_chg == 0:
             ce = np.nan
         else:
             ce = (q_dch / q_chg * 100.0) if cell_type == "cathode" else (q_chg / q_dch * 100.0)
-        out.append({"cycle": c, "ce": ce, "q_chg": q_chg, "q_dch": q_dch})
+
+        out.append({"cycle": c, "ce": ce, "q_chg": q_chg, "q_dch": q_dch, "cap_unit": used_unit})
+
     return pd.DataFrame(out).sort_values("cycle")
+
 
 def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
     cols = {c.lower(): c for c in columns}
@@ -1330,43 +1425,138 @@ def insert_line_breaks_vq(df: pd.DataFrame, cap_col: str, v_col: str) -> pd.Data
     pieces.append(d.iloc[last:])
     return _concat_nonempty(pieces)
 
-def compute_ce(df: pd.DataFrame, cell_type: str = "cathode") -> pd.DataFrame:
+def compute_ce(df: pd.DataFrame, cell_type: str = "cathode", cap_units: str = "auto") -> pd.DataFrame:
+    """Compute per-cycle charge/discharge capacities and Coulombic efficiency.
+
+    Parameters
+    ----------
+    cell_type:
+        "cathode" → CE = q_dch/q_chg * 100 (typical full-cell convention)
+        "anode"   → CE = q_chg/q_dch * 100 (when stripping/plating direction flips)
+    cap_units:
+        "mAh/g", "mAh", or "auto" (auto prefers mAh/g if available).
+    """
     if "Cycle Index" not in df.columns:
         return pd.DataFrame()
+
+    pref = (cap_units or "auto").strip().lower()
+    if pref in ("mah/g", "mahg", "specific", "spec"):
+        pref = "mah/g"
+    elif pref in ("mah", "abs", "absolute"):
+        pref = "mah"
+    else:
+        pref = "auto"
+
+    has_step = "Step Type" in df.columns
+
+    # Active mass (for optional conversion between mAh <-> mAh/g)
+    am_g = None
+    try:
+        am_g = df.attrs.get("active_mass_g", None)
+    except Exception:
+        am_g = None
+    if not isinstance(am_g, (int, float)) or not np.isfinite(am_g) or am_g <= 0:
+        am_g = None
+
+    # Column candidates
     sc_chg = "Chg. Spec. Cap.(mAh/g)" if "Chg. Spec. Cap.(mAh/g)" in df.columns else None
     sc_dch = "DChg. Spec. Cap.(mAh/g)" if "DChg. Spec. Cap.(mAh/g)" in df.columns else None
     sc_any = "Spec. Cap.(mAh/g)" if "Spec. Cap.(mAh/g)" in df.columns else None
+
+    chg_mAh = next((c for c in ["Chg. Cap.(mAh)", "Charge_Capacity(mAh)"] if c in df.columns), None)
+    dch_mAh = next((c for c in ["DChg. Cap.(mAh)", "Discharge_Capacity(mAh)"] if c in df.columns), None)
     cap_mAh = "Capacity(mAh)" if "Capacity(mAh)" in df.columns else None
-    has_step = "Step Type" in df.columns
+
+    def _max_pair(sub: pd.DataFrame, unit: str) -> Tuple[float, float, bool]:
+        q_chg = np.nan
+        q_dch = np.nan
+
+        if unit == "mah/g":
+            if sc_chg and sc_dch:
+                q_chg = pd.to_numeric(sub[sc_chg], errors="coerce").max()
+                q_dch = pd.to_numeric(sub[sc_dch], errors="coerce").max()
+                return q_chg, q_dch, True
+            if sc_any and has_step:
+                chg = sub[sub["Step Type"].astype(str).str.contains("Chg", na=False)].get(sc_any)
+                dch = sub[sub["Step Type"].astype(str).str.contains("DChg", na=False)].get(sc_any)
+                q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
+                q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
+                return q_chg, q_dch, True
+            if sc_any:
+                q = pd.to_numeric(sub.get(sc_any), errors="coerce").max()
+                return q, q, True
+            return np.nan, np.nan, False
+
+        # unit == "mah"
+        if chg_mAh and dch_mAh:
+            q_chg = pd.to_numeric(sub[chg_mAh], errors="coerce").max()
+            q_dch = pd.to_numeric(sub[dch_mAh], errors="coerce").max()
+            return q_chg, q_dch, True
+        if cap_mAh and has_step:
+            chg = sub[sub["Step Type"].astype(str).str.contains("Chg", na=False)].get(cap_mAh)
+            dch = sub[sub["Step Type"].astype(str).str.contains("DChg", na=False)].get(cap_mAh)
+            q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
+            q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
+            return q_chg, q_dch, True
+        if cap_mAh:
+            q = pd.to_numeric(sub.get(cap_mAh), errors="coerce").max()
+            return q, q, True
+        return np.nan, np.nan, False
 
     out = []
     for c in pd.unique(df["Cycle Index"].dropna()):
         sub = df[df["Cycle Index"] == c]
+
+        used_unit = None
         q_chg = np.nan
         q_dch = np.nan
-        if sc_chg and sc_dch:
-            q_chg = pd.to_numeric(sub[sc_chg], errors="coerce").max()
-            q_dch = pd.to_numeric(sub[sc_dch], errors="coerce").max()
-        elif sc_any and has_step:
-            chg = sub[sub["Step Type"].str.contains("Chg", na=False)].get(sc_any)
-            dch = sub[sub["Step Type"].str.contains("DChg", na=False)].get(sc_any)
-            q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
-            q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
-        elif cap_mAh and has_step:
-            chg = sub[sub["Step Type"].str.contains("Chg", na=False)].get(cap_mAh)
-            dch = sub[sub["Step Type"].str.contains("DChg", na=False)].get(cap_mAh)
-            q_chg = pd.to_numeric(chg, errors="coerce").max() if chg is not None else np.nan
-            q_dch = pd.to_numeric(dch, errors="coerce").max() if dch is not None else np.nan
-        elif cap_mAh:
-            q_chg = pd.to_numeric(sub.get(cap_mAh), errors="coerce").max()
-            q_dch = q_chg
+
+        if pref == "auto":
+            q_chg, q_dch, ok = _max_pair(sub, "mah/g")
+            if ok and (pd.notna(q_chg) or pd.notna(q_dch)):
+                used_unit = "mAh/g"
+            else:
+                q_chg, q_dch, ok2 = _max_pair(sub, "mah")
+                if ok2 and (pd.notna(q_chg) or pd.notna(q_dch)):
+                    used_unit = "mAh"
+        elif pref == "mah/g":
+            q_chg, q_dch, ok = _max_pair(sub, "mah/g")
+            if ok and (pd.notna(q_chg) or pd.notna(q_dch)):
+                used_unit = "mAh/g"
+            else:
+                q_chg, q_dch, ok2 = _max_pair(sub, "mah")
+                if ok2 and (pd.notna(q_chg) or pd.notna(q_dch)):
+                    # convert to mAh/g if possible
+                    if am_g:
+                        q_chg = (q_chg / am_g) if pd.notna(q_chg) else q_chg
+                        q_dch = (q_dch / am_g) if pd.notna(q_dch) else q_dch
+                        used_unit = "mAh/g"
+                    else:
+                        used_unit = "mAh"
+        else:  # pref == "mah"
+            q_chg, q_dch, ok = _max_pair(sub, "mah")
+            if ok and (pd.notna(q_chg) or pd.notna(q_dch)):
+                used_unit = "mAh"
+            else:
+                q_chg, q_dch, ok2 = _max_pair(sub, "mah/g")
+                if ok2 and (pd.notna(q_chg) or pd.notna(q_dch)):
+                    # convert to mAh if possible
+                    if am_g:
+                        q_chg = (q_chg * am_g) if pd.notna(q_chg) else q_chg
+                        q_dch = (q_dch * am_g) if pd.notna(q_dch) else q_dch
+                        used_unit = "mAh"
+                    else:
+                        used_unit = "mAh/g"
 
         if pd.isna(q_chg) or pd.isna(q_dch) or q_dch == 0 or q_chg == 0:
             ce = np.nan
         else:
             ce = (q_dch / q_chg * 100.0) if cell_type == "cathode" else (q_chg / q_dch * 100.0)
-        out.append({"cycle": c, "ce": ce, "q_chg": q_chg, "q_dch": q_dch})
+
+        out.append({"cycle": c, "ce": ce, "q_chg": q_chg, "q_dch": q_dch, "cap_unit": used_unit})
+
     return pd.DataFrame(out).sort_values("cycle")
+
 
 def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
     cols = {c.lower(): c for c in columns}
@@ -1383,6 +1573,43 @@ def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
         "step": pick("Step Type"),
     }
 
+
+
+# ----------------------------
+# Capacity unit helpers (global)
+# ----------------------------
+def pick_capacity_base_col(columns: List[str], pref: str = "mAh/g") -> Optional[str]:
+    """Pick a single 'base' capacity column name (either specific or absolute).
+    Preference can be 'mAh/g' or 'mAh'. Falls back gracefully if a preferred column
+    doesn't exist in the provided column list.
+    """
+    pref_norm = (pref or "").strip().lower()
+    want_spec = ("mah/g" in pref_norm) or ("/g" in pref_norm) or ("g" == pref_norm)
+    spec = "Spec. Cap.(mAh/g)"
+    mah = "Capacity(mAh)"
+
+    if want_spec:
+        if spec in columns:
+            return spec
+        if mah in columns:
+            return mah
+    else:
+        if mah in columns:
+            return mah
+        if spec in columns:
+            return spec
+
+    # Fallbacks (some sources may only have direction-specific columns)
+    for c in ["DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)", "DChg. Cap.(mAh)", "Chg. Cap.(mAh)"]:
+        if c in columns:
+            return c
+    return None
+
+def capacity_unit_from_col(col: Optional[str]) -> str:
+    return "mAh/g" if isinstance(col, str) and ("mAh/g" in col) else "mAh"
+
+def capacity_ylabel(unit: str) -> str:
+    return "Specific capacity (mAh/g)" if unit == "mAh/g" else "Capacity (mAh)"
 
 # ----------------------------
 # dQ/dV helpers (minimal / defaults)
@@ -2123,13 +2350,40 @@ with st.sidebar.form("upload_form", clear_on_submit=False):
     parse_now = st.form_submit_button("🚀 **launch files**")
 
 # Provide an easy way to clear state
-top_l, top_r = st.columns([6, 1])
+top_l, top_m, top_r = st.columns([5.6, 1.6, 1.0])
+
+# Global capacity unit (used across tabs).
+# Show this control only after the user has launched files (i.e., parsed data exists).
+_has_data = isinstance(st.session_state.get("parsed_by_file", None), dict) and len(st.session_state.get("parsed_by_file", {})) > 0
+
+if _has_data:
+    # Default: mAh/g if any file provides specific capacity; otherwise mAh.
+    if "cap_units_mode" not in st.session_state:
+        _p = st.session_state.get("parsed_by_file", {})
+        _has_spec_any = False
+        try:
+            _has_spec_any = any(("Spec. Cap.(mAh/g)" in d.columns) for d in _p.values())
+        except Exception:
+            _has_spec_any = False
+        st.session_state["cap_units_mode"] = "mAh/g" if _has_spec_any else "mAh"
+
+    with top_m:
+        st.segmented_control(
+            "Capacity unit",
+            options=["mAh/g", "mAh"],
+            key="cap_units_mode",
+            label_visibility="collapsed",
+        )
+        st.caption("Capacity unit")
+
 with top_r:
+
     st.toggle("⚡ Dynamic hover", value=st.session_state.get("dynamic_hover_mode", False), key="dynamic_hover_mode")
 
-    if "parsed_by_file" in st.session_state:
+    _show_reset = bool(uploaded_files) or _has_data or st.session_state.get("demo_loaded", False)
+    if _show_reset:
         if st.button("🧹 Reset", key="clear_parsed_main"):
-            for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files", "demo_loaded", "color_overrides_file", "color_overrides_family", "dynamic_hover_mode"]:
+            for k in ["parsed_by_file", "file_checks", "uploaded_names_cache", "selected_files", "demo_loaded", "color_overrides_file", "color_overrides_family", "dynamic_hover_mode", "cap_units_mode"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -2384,6 +2638,13 @@ def get_union_columns(frames: List[pd.DataFrame]) -> List[str]:
 frames_selected = get_selected_frames()
 union_cols = get_union_columns(frames_selected)
 G = detect_columns(union_cols)
+
+# Resolve global capacity column based on the user's unit preference
+cap_units_pref = st.session_state.get("cap_units_mode", "mAh/g")
+CAP_BASE_COL = pick_capacity_base_col(union_cols, cap_units_pref) or G.get("capacity")
+G["capacity"] = CAP_BASE_COL
+CAP_UNIT = capacity_unit_from_col(CAP_BASE_COL)
+CAP_YLABEL = capacity_ylabel(CAP_UNIT)
 
 # ----------------------------
 # View selector (LAZY EXECUTION)
@@ -2938,18 +3199,29 @@ if view == "dQ/dV":
 
     def _pick_qcols(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
         base_cap = G.get("capacity")
+        pref = (st.session_state.get("cap_units_mode", "mAh/g") or "mAh/g").strip().lower()
+        want_spec = ("mah/g" in pref) or ("/g" in pref)
+
+        if want_spec:
+            ch_cands = ["Chg. Spec. Cap.(mAh/g)", base_cap, "Chg. Cap.(mAh)", "Charge_Capacity(mAh)", "Charge Capacity(mAh)"]
+            dch_cands = ["DChg. Spec. Cap.(mAh/g)", base_cap, "DChg. Cap.(mAh)", "Discharge_Capacity(mAh)", "Discharge Capacity(mAh)"]
+        else:
+            ch_cands = ["Chg. Cap.(mAh)", "Charge_Capacity(mAh)", "Charge Capacity(mAh)", base_cap, "Chg. Spec. Cap.(mAh/g)"]
+            dch_cands = ["DChg. Cap.(mAh)", "Discharge_Capacity(mAh)", "Discharge Capacity(mAh)", base_cap, "DChg. Spec. Cap.(mAh/g)"]
+
         ch_qcol = None
-        for cand in ["Chg. Spec. Cap.(mAh/g)", "Charge_Capacity(mAh)", "Charge Capacity(mAh)", base_cap]:
+        for cand in ch_cands:
             if cand and cand in df.columns:
                 ch_qcol = cand
                 break
+
         dch_qcol = None
-        for cand in ["DChg. Spec. Cap.(mAh/g)", "Discharge_Capacity(mAh)", "Discharge Capacity(mAh)", base_cap]:
+        for cand in dch_cands:
             if cand and cand in df.columns:
                 dch_qcol = cand
                 break
-        return ch_qcol, dch_qcol
 
+        return ch_qcol, dch_qcol
     def _cycles_from_df(df: pd.DataFrame) -> List[int]:
         if cyc_col not in df.columns:
             return []
@@ -3288,11 +3560,7 @@ if view == "Capacity vs Cycle":
         st.stop()
 
     # choose a capacity column that exists in at least one file
-    cap_col = None
-    for cand in ["Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)", "Capacity(mAh)"]:
-        if cand in union_cols:
-            cap_col = cand
-            break
+    cap_col = CAP_BASE_COL
     if cap_col is None:
         st.info("No capacity column detected.")
         st.stop()
@@ -3391,11 +3659,7 @@ if view == "Capacity & CE":
         st.info("Need Cycle Index for CE plot.")
         st.stop()
 
-    cap_col = None
-    for cand in ["Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)", "Capacity(mAh)"]:
-        if cand in union_cols:
-            cap_col = cand
-            break
+    cap_col = CAP_BASE_COL
     if cap_col is None:
         st.info("Need a capacity column for CE plot.")
         st.stop()
@@ -3409,7 +3673,7 @@ if view == "Capacity & CE":
             continue
         c = color_for_src(src)
 
-        ce_df = compute_ce(df, cell_type=ce_cell_type)
+        ce_df = compute_ce(df, cell_type=ce_cell_type, cap_units=st.session_state.get('cap_units_mode', 'auto'))
         cap_cycle = None
         if cap_col in df.columns:
             cap_cycle = df[[cyc, cap_col]].dropna().groupby(cyc)[cap_col].max().reset_index()
@@ -3706,7 +3970,7 @@ if view == "ICE Boxplot":
         if "Cycle Index" not in df.columns:
             continue
         fam = family_from_filename(src)
-        ce_df = compute_ce(df, cell_type=ce_cell_type)
+        ce_df = compute_ce(df, cell_type=ce_cell_type, cap_units=st.session_state.get('cap_units_mode', 'auto'))
         if ce_df.empty:
             continue
         ce_df = ce_df.sort_values("cycle")
@@ -3759,8 +4023,7 @@ if view == "ICE Boxplot":
         st.info("No capacity data available for boxplot.")
         st.stop()
 
-    has_spec_cap = any(c in union_cols for c in ["Spec. Cap.(mAh/g)", "DChg. Spec. Cap.(mAh/g)", "Chg. Spec. Cap.(mAh/g)"])
-    y_label = "Specific capacity (mAh/g)" if has_spec_cap else "Capacity"
+    y_label = CAP_YLABEL
 
     fig, ax = plt.subplots(figsize=(6, 4), dpi=150)
     groups = sorted(plot_data["Group"].unique().tolist())
@@ -3923,7 +4186,7 @@ if view == "Capacity Fade Boxplot":
             continue
 
         fam = family_from_filename(src)
-        ce_df = compute_ce(df, cell_type=ce_cell_type)
+        ce_df = compute_ce(df, cell_type=ce_cell_type, cap_units=st.session_state.get('cap_units_mode', 'auto'))
         if ce_df is None or ce_df.empty:
             continue
 
@@ -3960,16 +4223,7 @@ if view == "Capacity Fade Boxplot":
     if y_metric == "CE (%)":
         y_label = "Coulombic efficiency (%)"
     else:
-        # heuristic: if any selected file has spec capacity columns, label as mAh/g
-        has_spec = any(
-            c in union_cols for c in [
-                "Spec. Cap.(mAh/g)",
-                "DChg. Spec. Cap.(mAh/g)",
-                "Chg. Spec. Cap.(mAh/g)",
-            ]
-        )
-        y_label = f"{y_metric} (mAh/g)" if has_spec else f"{y_metric} (mAh)"
-
+        y_label = f"{y_metric} ({CAP_UNIT})"
     if x_mode == "Group":
         fig_box = px.box(
             df_plot,
