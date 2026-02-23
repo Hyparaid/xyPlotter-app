@@ -1616,11 +1616,11 @@ def capacity_ylabel(unit: str) -> str:
 # ----------------------------
 @dataclass
 class DQDVOptions:
-    dv_min: float = 0.005       # keep points only when |ΔV| >= dv_min
+    dv_min: float = 0.005    # keep points only when |ΔV| >= dv_min
     dv_eps: float = 1e-6        # drop derivatives when |ΔV| < dv_eps
     derivative: str = "central" # forward|backward|central
-    shift: int = -1             # -1,0,+1 voltage alignment for central difference
-    smooth: int = 3             # moving-average window on dQ/dV (points)
+    shift: int = 0             # -1,0,+1 voltage alignment for central difference
+    smooth: int = 3          # moving-average window on dQ/dV (points)
     smooth_center: bool = True
 
 def _reduce_by_dv(v: np.ndarray, dv_min: float) -> np.ndarray:
@@ -1638,7 +1638,12 @@ def _reduce_by_dv(v: np.ndarray, dv_min: float) -> np.ndarray:
     return np.asarray(keep, dtype=int)
 
 def compute_dqdv_segment_df(seg: pd.DataFrame, vcol: str, qcol: str, opts: DQDVOptions) -> pd.DataFrame:
-    """Compute dQ/dV for one segment (charge OR discharge) given voltage + capacity columns."""
+    """
+    Robust dQ/dV:
+    - Sort by Voltage (so Q becomes a function of V)
+    - Bin/interpolate to a fixed ΔV grid
+    - Differentiate on that grid (prevents tiny-dV / CV blow-ups)
+    """
     if seg is None or seg.empty or (vcol not in seg.columns) or (qcol not in seg.columns):
         return pd.DataFrame(columns=["Voltage", "dQdV"])
 
@@ -1650,63 +1655,37 @@ def compute_dqdv_segment_df(seg: pd.DataFrame, vcol: str, qcol: str, opts: DQDVO
     q = pd.to_numeric(s[qcol], errors="coerce").to_numpy(dtype=float)
 
     m = np.isfinite(v) & np.isfinite(q)
-    v = v[m]
-    q = q[m]
-    if len(v) < 2:
+    v, q = v[m], q[m]
+    if v.size < 5:
         return pd.DataFrame(columns=["Voltage", "dQdV"])
 
-    # point reduction to avoid CV-region spikes from tiny dV
-    idx = _reduce_by_dv(v, float(opts.dv_min))
-    v = v[idx]
-    q = q[idx]
-    if len(v) < 2:
+    # Sort by voltage to enforce Q(V)
+    order = np.argsort(v)
+    v, q = v[order], q[order]
+
+    # Choose a voltage step (reuse opts.dv_min as "grid step")
+    dv = float(opts.dv_min) if (opts.dv_min and opts.dv_min > 0) else 0.005  # 5 mV default
+    dv = max(dv, 1e-4)
+
+    # Bin voltage to dv grid and average Q inside each bin (kills duplicates / CV verticals)
+    vbin = np.round(v / dv) * dv
+    tmp = pd.DataFrame({"v": vbin, "q": q}).groupby("v", as_index=False).agg(q=("q", "mean"))
+    v_u = tmp["v"].to_numpy(dtype=float)
+    q_u = tmp["q"].to_numpy(dtype=float)
+
+    if v_u.size < 5 or (v_u.max() - v_u.min()) < (3 * dv):
         return pd.DataFrame(columns=["Voltage", "dQdV"])
 
-    der = str(opts.derivative).lower()
-    shift = int(opts.shift)
-    dv_eps = float(opts.dv_eps)
+    # Uniform voltage grid
+    vgrid = np.arange(v_u.min(), v_u.max() + 0.5 * dv, dv)
+    qgrid = np.interp(vgrid, v_u, q_u)
+    dqdv = np.gradient(qgrid, vgrid)
 
-    if der not in {"forward", "backward", "central"}:
-        der = "central"
-    if shift not in {-1, 0, 1}:
-        shift = -1
+    out = pd.DataFrame({"Voltage": vgrid, "dQdV": dqdv})
 
-    if der == "forward":
-        dv = np.diff(v)
-        dq = np.diff(q)
-        ok = np.abs(dv) >= dv_eps
-        dqdv = dq[ok] / dv[ok]
-        v_out = v[:-1][ok]
-    elif der == "backward":
-        dv = v[1:] - v[:-1]
-        dq = q[1:] - q[:-1]
-        ok = np.abs(dv) >= dv_eps
-        dqdv = dq[ok] / dv[ok]
-        v_out = v[1:][ok]
-    else:  # central
-        if len(v) < 3:
-            dv = np.diff(v)
-            dq = np.diff(q)
-            ok = np.abs(dv) >= dv_eps
-            dqdv = dq[ok] / dv[ok]
-            v_out = v[:-1][ok]
-        else:
-            dv = v[2:] - v[:-2]
-            dq = q[2:] - q[:-2]
-            ok = np.abs(dv) >= dv_eps
-            dqdv = dq[ok] / dv[ok]
-            if shift == -1:
-                v_out = v[:-2][ok]
-            elif shift == 0:
-                v_out = v[1:-1][ok]
-            else:
-                v_out = v[2:][ok]
-
-    out = pd.DataFrame({"Voltage": v_out, "dQdV": dqdv})
-
-    # smoothing
+    # Optional smoothing (keep your existing knob)
     w = int(opts.smooth)
-    if w > 1 and len(out) > 1:
+    if w > 1 and len(out) > 2:
         out["dQdV"] = (
             out["dQdV"]
             .rolling(window=w, center=bool(opts.smooth_center), min_periods=1)
@@ -1714,7 +1693,6 @@ def compute_dqdv_segment_df(seg: pd.DataFrame, vcol: str, qcol: str, opts: DQDVO
         )
 
     return out
-
 
 # ----------------------------
 # DCIR function (kept compatible)
@@ -3274,10 +3252,19 @@ if view == "dQ/dV":
             if d.empty:
                 continue
 
-            # sort by time if possible (keeps segments clean)
+            # sort chronologically without getting wrecked by step-local Time resets
             if tcol and tcol in d.columns:
-                d[tcol] = pd.to_numeric(d[tcol], errors="coerce")
-                d = d.sort_values(tcol)
+                d = d.copy()
+                d["_t"] = build_global_time_seconds(
+                    d,
+                    time_col=tcol,
+                    cycle_col=cyc_col,          # <- your Cycle Index column
+                    step_col="Step Type",
+                )
+                d = d.sort_values("_t")
+            else:
+                # safest fallback: keep original file order
+                d = d.sort_index()
 
             cur_mA, _ = _get_current_mA(d)
             if cur_mA is None:
@@ -3288,8 +3275,9 @@ if view == "dQ/dV":
                 continue
             any_qcol = any_qcol or (ch_qcol or dch_qcol)
 
-            ch_seg = d[cur_mA > 0.0]
-            dch_seg = d[cur_mA < 0.0]
+            I_EPS = 0.05  # mA (ignore rest / noise; tune 0.02–0.2)
+            ch_seg  = d[cur_mA >  I_EPS]
+            dch_seg = d[cur_mA < -I_EPS]
 
             ch_curve = compute_dqdv_segment_df(ch_seg, vcol=vcol, qcol=ch_qcol, opts=opts) if ch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
             dch_curve = compute_dqdv_segment_df(dch_seg, vcol=vcol, qcol=dch_qcol, opts=opts) if dch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
@@ -3370,9 +3358,19 @@ if view == "dQ/dV":
             if d.empty:
                 continue
 
+            # sort chronologically without getting wrecked by step-local Time resets
             if tcol and tcol in d.columns:
-                d[tcol] = pd.to_numeric(d[tcol], errors="coerce")
-                d = d.sort_values(tcol)
+                d = d.copy()
+                d["_t"] = build_global_time_seconds(
+                    d,
+                    time_col=tcol,
+                    cycle_col=cyc_col,          # <- your Cycle Index column
+                    step_col="Step Type",
+                )
+                d = d.sort_values("_t")
+            else:
+                # safest fallback: keep original file order
+                d = d.sort_index()
 
             cur_mA, _ = _get_current_mA(d)
             if cur_mA is None:
@@ -3383,8 +3381,9 @@ if view == "dQ/dV":
                 continue
             any_qcol = any_qcol or (ch_qcol or dch_qcol)
 
-            ch_seg = d[cur_mA > 0.0]
-            dch_seg = d[cur_mA < 0.0]
+            I_EPS = 0.05  # mA (ignore rest / noise; tune 0.02–0.2)
+            ch_seg  = d[cur_mA >  I_EPS]
+            dch_seg = d[cur_mA < -I_EPS]
 
             ch_curve = compute_dqdv_segment_df(ch_seg, vcol=vcol, qcol=ch_qcol, opts=opts) if ch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
             dch_curve = compute_dqdv_segment_df(dch_seg, vcol=vcol, qcol=dch_qcol, opts=opts) if dch_qcol else pd.DataFrame(columns=["Voltage","dQdV"])
