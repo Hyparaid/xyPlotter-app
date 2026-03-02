@@ -1616,11 +1616,11 @@ def capacity_ylabel(unit: str) -> str:
 # ----------------------------
 @dataclass
 class DQDVOptions:
-    dv_min: float = 0.005    # keep points only when |ΔV| >= dv_min
+    dv_min: float = 0.012    # keep points only when |ΔV| >= dv_min
     dv_eps: float = 1e-6        # drop derivatives when |ΔV| < dv_eps
     derivative: str = "central" # forward|backward|central
     shift: int = 0             # -1,0,+1 voltage alignment for central difference
-    smooth: int = 3          # moving-average window on dQ/dV (points)
+    smooth: int = 3        # moving-average window on dQ/dV (points)
     smooth_center: bool = True
 
 def _reduce_by_dv(v: np.ndarray, dv_min: float) -> np.ndarray:
@@ -1638,12 +1638,6 @@ def _reduce_by_dv(v: np.ndarray, dv_min: float) -> np.ndarray:
     return np.asarray(keep, dtype=int)
 
 def compute_dqdv_segment_df(seg: pd.DataFrame, vcol: str, qcol: str, opts: DQDVOptions) -> pd.DataFrame:
-    """
-    Robust dQ/dV:
-    - Sort by Voltage (so Q becomes a function of V)
-    - Bin/interpolate to a fixed ΔV grid
-    - Differentiate on that grid (prevents tiny-dV / CV blow-ups)
-    """
     if seg is None or seg.empty or (vcol not in seg.columns) or (qcol not in seg.columns):
         return pd.DataFrame(columns=["Voltage", "dQdV"])
 
@@ -1651,47 +1645,55 @@ def compute_dqdv_segment_df(seg: pd.DataFrame, vcol: str, qcol: str, opts: DQDVO
     if s.empty:
         return pd.DataFrame(columns=["Voltage", "dQdV"])
 
+    # IMPORTANT: keep the incoming order (time order) — do NOT sort by voltage here
     v = pd.to_numeric(s[vcol], errors="coerce").to_numpy(dtype=float)
     q = pd.to_numeric(s[qcol], errors="coerce").to_numpy(dtype=float)
-
     m = np.isfinite(v) & np.isfinite(q)
     v, q = v[m], q[m]
     if v.size < 5:
         return pd.DataFrame(columns=["Voltage", "dQdV"])
 
-    # Sort by voltage to enforce Q(V)
-    order = np.argsort(v)
-    v, q = v[order], q[order]
+    # --- 1) enforce monotonic V inside the segment (kills relax / control dithering) ---
+    tol = 1e-4  # 0.1 mV tolerance
+    if v[-1] >= v[0]:  # charge-like (V should increase)
+        vmax = -np.inf
+        keep = np.zeros_like(v, dtype=bool)
+        for i, vi in enumerate(v):
+            if vi >= vmax - tol:
+                keep[i] = True
+                if vi > vmax:
+                    vmax = vi
+    else:  # discharge-like (V should decrease)
+        vmin = np.inf
+        keep = np.zeros_like(v, dtype=bool)
+        for i, vi in enumerate(v):
+            if vi <= vmin + tol:
+                keep[i] = True
+                if vi < vmin:
+                    vmin = vi
 
-    # Choose a voltage step (reuse opts.dv_min as "grid step")
-    dv = float(opts.dv_min) if (opts.dv_min and opts.dv_min > 0) else 0.005  # 5 mV default
-    dv = max(dv, 1e-4)
-
-    # Bin voltage to dv grid and average Q inside each bin (kills duplicates / CV verticals)
-    vbin = np.round(v / dv) * dv
-    tmp = pd.DataFrame({"v": vbin, "q": q}).groupby("v", as_index=False).agg(q=("q", "mean"))
-    v_u = tmp["v"].to_numpy(dtype=float)
-    q_u = tmp["q"].to_numpy(dtype=float)
-
-    if v_u.size < 5 or (v_u.max() - v_u.min()) < (3 * dv):
+    v, q = v[keep], q[keep]
+    if v.size < 5:
         return pd.DataFrame(columns=["Voltage", "dQdV"])
 
-    # Uniform voltage grid
-    vgrid = np.arange(v_u.min(), v_u.max() + 0.5 * dv, dv)
-    qgrid = np.interp(vgrid, v_u, q_u)
-    dqdv = np.gradient(qgrid, vgrid)
+    # --- 2) instrument-style decimation: keep points only when |ΔV| >= dv_min ---
+    idx = _reduce_by_dv(v, float(opts.dv_min))
+    v, q = v[idx], q[idx]
+    if v.size < 5:
+        return pd.DataFrame(columns=["Voltage", "dQdV"])
 
-    out = pd.DataFrame({"Voltage": vgrid, "dQdV": dqdv})
-
-    # Optional smoothing (keep your existing knob)
+    # --- 3) smooth Q before derivative (sharper than smoothing dQ/dV) ---
     w = int(opts.smooth)
-    if w > 1 and len(out) > 2:
-        out["dQdV"] = (
-            out["dQdV"]
-            .rolling(window=w, center=bool(opts.smooth_center), min_periods=1)
-            .mean()
-        )
+    if w > 1:
+        # median is robust for CV tails; switch to .mean() if you prefer
+        q = pd.Series(q).rolling(window=w, center=True, min_periods=1).median().to_numpy()
 
+    # --- 4) derivative on irregular x-spacing (uses real measured voltages) ---
+    dqdv = np.gradient(q, v)
+
+    out = pd.DataFrame({"Voltage": v, "dQdV": dqdv}).dropna()
+    # sort only for nicer plotting left→right
+    out = out.sort_values("Voltage")
     return out
 
 # ----------------------------
