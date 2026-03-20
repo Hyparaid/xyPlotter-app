@@ -2314,7 +2314,7 @@ else:
             st.caption(f"Logo missing: {logo_path.name}")
 
     st.title("🔋 BATTERY CELL DATA — VISUALIZER 📈")
-    st.caption("::::::: ahan was here ::::::::")
+    st.caption("::::::: Built by the Preli team ::::::::")
 
 
 
