@@ -2477,10 +2477,10 @@ if not selected_files:
 # Color mode (global)
 # ----------------------------
 families_in_data = sorted({family_from_filename(f) for f in files_all})
-with st.sidebar.expander("Color mode", expanded=True):
+with st.sidebar.expander("Grouping preferences", expanded=True):
     color_mode_global = st.radio(
-        "Color by",
-        ["Per file", "Filename family"],
+        "Sort data traces",
+        ["individually per file", "group by filename"],
         index=0,
         horizontal=True
     )
