@@ -2640,7 +2640,7 @@ PAGES = [
 view = st.segmented_control(
     "View selector",
     options=PAGES,
-    default="Capacity vs Cycle",
+    default="Voltage–Capacity",
     key="view_selector_main",
     label_visibility="collapsed",
 )
