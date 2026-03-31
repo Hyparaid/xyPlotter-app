@@ -2649,7 +2649,7 @@ view = st.segmented_control(
 # ----------------------------
 if view == "Raw File Preview":
     st.subheader("Preview parsed data (first rows per file)")
-    max_rows = st.number_input("Rows per file", min_value=5, max_value=100000, value=900, step=50)
+    max_rows = st.number_input("Rows per file", min_value=5, max_value=1000000, value=900, step=50)
     for f in selected_files:
         df = parsed_by_file[f]
         am = None
