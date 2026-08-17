@@ -3277,7 +3277,7 @@ if view == "dQ/dV":
                 continue
             any_qcol = any_qcol or (ch_qcol or dch_qcol)
 
-            I_EPS = 0.2  # mA (ignore rest / noise; tune 0.02–0.2)
+            I_EPS = 0.05  # mA (ignore rest / noise; tune 0.02–0.2)
             ch_seg  = d[cur_mA >  I_EPS]
             dch_seg = d[cur_mA < -I_EPS]
 
